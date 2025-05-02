@@ -207,7 +207,23 @@ func (p *backendConnectionsPool) RoundTrip(r *http.Request) (*http.Response, err
 		// TODO: return this as a response instead.
 		return nil, errors.New("backend unavailable")
 	}
-	return cc.RoundTrip(r)
+	rsp, err := cc.RoundTrip(r)
+	if err != nil {
+		// Disconnect and forget this backend.
+		p.Lock()
+		if p.conns[keyHash(kh)] == cc {
+			delete(p.conns, keyHash(kh))
+		}
+		p.Unlock()
+		if !cc.State().Closed {
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+				cc.Shutdown(ctx)
+			}()
+		}
+	}
+	return rsp, err
 }
 
 func (p *backendConnectionsPool) handleBackend(hs *http.Server, c *tls.Conn, h http.Handler) {
