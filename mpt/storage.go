@@ -11,7 +11,7 @@ type Storage interface {
 	Load(ctx context.Context, label Label) (*Node, error)
 
 	// LoadPath loads the siblings of the path to reach the given node
-	// (intuitively, the inlcusion proof). If the node is not present, the
+	// (intuitively, the inclusion proof). If the node is not present, the
 	// sequence stops with what would be its sibling if it were present. The
 	// returned nodes are ordered from the node sibling up to the root's child.
 	LoadPath(ctx context.Context, label Label) ([]*Node, error)
