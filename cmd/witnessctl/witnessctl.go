@@ -5,8 +5,12 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"filippo.io/torchwood/internal/witness"
 	"golang.org/x/mod/sumdb/note"
@@ -23,6 +27,7 @@ func usage() {
 	fmt.Println("    add-key -db <path> -origin <origin> -key <verifier key>")
 	fmt.Println("    del-key -db <path> -origin <origin> -key <verifier key>")
 	fmt.Println("    add-sigsum-log -db <path> -key <hex-encoded key>")
+	fmt.Println("    pull-logs -db <path> -source <witness url> [-verbose]")
 	fmt.Println("    list-logs -db <path>")
 	os.Exit(1)
 }
@@ -39,13 +44,16 @@ func main() {
 		fs.Parse(os.Args[2:])
 		db := openDB(*dbFlag)
 		addLog(db, *originFlag)
+		log.Printf("Added log %q.", *originFlag)
 
 	case "add-key":
 		originFlag := fs.String("origin", "", "log name")
 		keyFlag := fs.String("key", "", "verifier key")
 		fs.Parse(os.Args[2:])
 		db := openDB(*dbFlag)
+		checkKeyMatches(*originFlag, *keyFlag)
 		addKey(db, *originFlag, *keyFlag)
+		log.Printf("Added key %q for log %q.", *keyFlag, *originFlag)
 
 	case "del-key":
 		originFlag := fs.String("origin", "", "log name")
@@ -53,12 +61,20 @@ func main() {
 		fs.Parse(os.Args[2:])
 		db := openDB(*dbFlag)
 		delKey(db, *originFlag, *keyFlag)
+		log.Printf("Deleted key %q for log %q.", *keyFlag, *originFlag)
 
 	case "add-sigsum-log":
 		keyFlag := fs.String("key", "", "hex-encoded key")
 		fs.Parse(os.Args[2:])
 		db := openDB(*dbFlag)
 		addSigsumLog(db, *keyFlag)
+
+	case "pull-logs":
+		sourceFlag := fs.String("source", "", "witness network log list URL or file path")
+		verboseFlag := fs.Bool("verbose", false, "verbose output")
+		fs.Parse(os.Args[2:])
+		db := openDB(*dbFlag)
+		pullLogs(db, *sourceFlag, *verboseFlag)
 
 	case "list-logs":
 		fs.Parse(os.Args[2:])
@@ -84,10 +100,9 @@ func addLog(db *sqlite.Conn, origin string) {
 		nil, origin, base64.StdEncoding.EncodeToString(treeHash[:])); err != nil {
 		log.Fatalf("Error adding log: %v", err)
 	}
-	log.Printf("Added log %q.", origin)
 }
 
-func addKey(db *sqlite.Conn, origin string, vk string) {
+func checkKeyMatches(origin string, vk string) {
 	v, err := note.NewVerifier(vk)
 	if err != nil {
 		log.Fatalf("Error parsing verifier key: %v", err)
@@ -95,11 +110,13 @@ func addKey(db *sqlite.Conn, origin string, vk string) {
 	if v.Name() != origin {
 		log.Printf("Warning: verifier key name %q does not match origin %q.", v.Name(), origin)
 	}
-	err = sqlitexExec(db, "INSERT INTO key (origin, key) VALUES (?, ?)", nil, origin, vk)
+}
+
+func addKey(db *sqlite.Conn, origin string, vk string) {
+	err := sqlitexExec(db, "INSERT INTO key (origin, key) VALUES (?, ?)", nil, origin, vk)
 	if err != nil {
 		log.Fatalf("Error adding key: %v", err)
 	}
-	log.Printf("Added key %q.", vk)
 }
 
 func delKey(db *sqlite.Conn, origin string, vk string) {
@@ -110,7 +127,6 @@ func delKey(db *sqlite.Conn, origin string, vk string) {
 	if db.Changes() == 0 {
 		log.Fatalf("Key %q not found.", vk)
 	}
-	log.Printf("Deleted key %q.", vk)
 }
 
 func addSigsumLog(db *sqlite.Conn, keyFlag string) {
@@ -129,6 +145,83 @@ func addSigsumLog(db *sqlite.Conn, keyFlag string) {
 	}
 	addLog(db, origin)
 	addKey(db, origin, vk)
+	log.Printf("Added Sigsum log %q with key %q.", origin, vk)
+}
+
+func pullLogs(db *sqlite.Conn, source string, verbose bool) {
+	var logList []byte
+	if strings.HasPrefix(source, "https://") {
+		client := http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Get(source)
+		if err != nil {
+			log.Fatalf("Error fetching log list: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			log.Fatalf("Error fetching log list: HTTP %d", resp.StatusCode)
+		}
+		logList, err = io.ReadAll(resp.Body)
+		if err != nil {
+			log.Fatalf("Error reading log list: %v", err)
+		}
+	} else {
+		var err error
+		logList, err = os.ReadFile(source)
+		if err != nil {
+			log.Fatalf("Error reading log list: %v", err)
+		}
+	}
+	logs, err := parseLogList(logList, verbose)
+	if err != nil {
+		log.Fatalf("Error parsing log list: %v", err)
+	}
+	for origin, vkey := range logs {
+		keys, exists := logKeys(db, origin)
+		if exists {
+			if keys[vkey] {
+				// Key already exists, nothing to do.
+				if verbose {
+					log.Printf("Log %q with key %q already exists, skipping.", origin, vkey)
+				}
+				continue
+			}
+			// Key is different, warn.
+			log.Printf("Warning: log %q is listed with a different key than the one in the database.\n", origin)
+			log.Printf("  - existing keys:\n")
+			for k := range keys {
+				log.Printf("    - %q\n", k)
+			}
+			log.Printf("  - new key:\n")
+			log.Printf("    - %q\n", vkey)
+			continue
+		}
+		// New log, add it.
+		addLog(db, origin)
+		addKey(db, origin, vkey)
+		if verbose {
+			log.Printf("Added log %q with key %q.", origin, vkey)
+		}
+	}
+}
+
+func logKeys(db *sqlite.Conn, origin string) (keys map[string]bool, exists bool) {
+	keys = make(map[string]bool)
+	if err := sqlitexExec(db, "SELECT 1 FROM log WHERE origin = ?", func(stmt *sqlite.Stmt) error {
+		exists = true
+		return nil
+	}, origin); err != nil {
+		log.Fatalf("Error looking for log %q: %v", origin, err)
+	}
+	if !exists {
+		return keys, false
+	}
+	if err := sqlitexExec(db, "SELECT key FROM key WHERE origin = ?", func(stmt *sqlite.Stmt) error {
+		keys[stmt.ColumnText(0)] = true
+		return nil
+	}, origin); err != nil {
+		log.Fatalf("Error querying keys: %v", err)
+	}
+	return keys, true
 }
 
 func listLogs(db *sqlite.Conn) {

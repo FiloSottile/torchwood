@@ -16,7 +16,6 @@ import (
 	"log"
 	"net/url"
 
-	"github.com/caarlos0/sshmarshal"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
@@ -55,8 +54,11 @@ func main() {
 	fmt.Printf("- origin URL-encoded: %s\n", url.QueryEscape(origin))
 
 	const algEd25519 = 1
-	skey := fmt.Sprintf("PRIVATE+KEY+%s+%08x+%s", origin, noteKeyHash(origin, append([]byte{algEd25519}, publicKey...)), base64.StdEncoding.EncodeToString(append([]byte{algEd25519}, privateKey.Seed()...)))
+	kh := noteKeyHash(origin, append([]byte{algEd25519}, publicKey...))
+	vkey := fmt.Sprintf("%s+%08x+%s", origin, kh, base64.StdEncoding.EncodeToString(append([]byte{algEd25519}, publicKey...)))
+	skey := fmt.Sprintf("PRIVATE+KEY+%s+%08x+%s", origin, kh, base64.StdEncoding.EncodeToString(append([]byte{algEd25519}, privateKey.Seed()...)))
 	s, _ := note.NewSigner(skey)
+	fmt.Printf("- log note vkey: %s\n", vkey)
 	fmt.Printf("- log note key: %s\n", skey)
 
 	witSeed := make([]byte, ed25519.SeedSize)
@@ -69,7 +71,7 @@ func main() {
 	pkHash := sigsum.HashBytes(ss.PublicKey().(ssh.CryptoPublicKey).CryptoPublicKey().(ed25519.PublicKey))
 	fmt.Printf("- witness key hash: %s\n", hex.EncodeToString(pkHash[:]))
 	fmt.Printf("- witness key: %x\n", witKey)
-	pemKey, err := sshmarshal.MarshalPrivateKey(witKey, "")
+	pemKey, err := ssh.MarshalPrivateKey(witKey, "")
 	if err != nil {
 		log.Fatal(err)
 	}

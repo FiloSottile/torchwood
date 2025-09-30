@@ -88,6 +88,16 @@ the origin and key from a 32-byte hex-encoded Ed25519 public key.
 
     witnessctl list-logs -db <path>
 
+The `pull-logs` command fetches a list of known logs from [a witness network log
+list](https://github.com/transparency-dev/witness-network/blob/main/site/content/participate.md#automate-discovery-of-logs-in-the-selected-lists)
+URL or file path. It only adds new logs, it does not remove or change the keys
+of existing ones. It is designed to run in a cronjob, and by default (without
+`-verbose`) it only prints output if there are logs with keys different from
+what is already in the database. This is unexpected and manual investigation as
+to why the log list changed (or disagrees with manual configuration) is needed.
+
+    witnessctl pull-logs -db <path> -source <log list url> -verbose
+
 The `list-logs` command lists known logs, in JSON lines like the following.
 
     {"origin":"sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562","size":5,"root_hash":"QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=","keys":["sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562+5202289b+Af/cLU2Y5BJNP+r3iMDC+av9eWCD0fBJVDfzAux5zxAP"]}

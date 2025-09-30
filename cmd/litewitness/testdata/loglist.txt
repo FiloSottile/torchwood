@@ -1,0 +1,74 @@
+# pull logs
+exec witnessctl pull-logs -source=log_list.0
+! stdout .
+! stderr .
+
+# pull logs again, with no changes
+exec witnessctl pull-logs -source=log_list.1
+! stdout .
+! stderr .
+
+# pull logs again, with a key change
+exec witnessctl pull-logs -source=log_list.2
+! stdout .
+stderr 'listed with a different key'
+
+# check state
+exec witnessctl list-logs
+cmp stdout list-logs.jsonl
+! stderr .
+
+
+-- log_list.0 --
+#
+# List:      10qps-100klogs
+# Revision:  123
+# Generated: YYYY-MM-DD HH:MM:SS UTC
+# Other undefined debug information.
+#
+logs/v0
+
+# gentest seed 467e9782a4eaa2bca9c9f5bcb067fb7bce1bfcae7b18f27bac0900ad93825300
+vkey sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4cd2e9b8702+9bc54c7f+AVv6q3xDaHxI2aTemqEb7W6ZcbO7QbTqTr20thOqfqsw
+qpd 86400
+contact https://tlog.foo.org/contact
+unknown
+foo bar
+
+# gentest seed 07210b16c5409251a63305371bb0e86bbe9e005c41ca1963f9ed3d89931a8a16
+vkey sigsum.org/v1/tree/2ef59132082631d13e353b5ae49b22bc51a9bd59f41a2d570960a9658c1ed151+e2137795+ATp+37IPHc3SbPGzFMyZmPTOUlClk6PYPH+Ce5JiCb/h
+origin example.com/foo
+qpd 24
+contact sysadmin (at) bar.org
+
+-- log_list.1 --
+logs/v0
+
+# new log
+# gentest seed 92540ba271142b0011c96531067b8f1f7695fd16ff7d92833767f821ab983c4d
+vkey sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120+7f693d84+AUlxeri80AO7/4j/+OGo+5M2Sud0ktFg34uZl2fZnjJT
+
+# existing log, same key
+vkey sigsum.org/v1/tree/2ef59132082631d13e353b5ae49b22bc51a9bd59f41a2d570960a9658c1ed151+e2137795+ATp+37IPHc3SbPGzFMyZmPTOUlClk6PYPH+Ce5JiCb/h
+origin example.com/foo
+
+-- log_list.2 --
+logs/v0
+
+# new log
+# gentest seed 92540ba271142b0011c96531067b8f1f7695fd16ff7d92833767f821ab983c4d
+vkey sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120+7f693d84+AUlxeri80AO7/4j/+OGo+5M2Sud0ktFg34uZl2fZnjJT
+
+# existing log, same key
+vkey sigsum.org/v1/tree/2ef59132082631d13e353b5ae49b22bc51a9bd59f41a2d570960a9658c1ed151+e2137795+ATp+37IPHc3SbPGzFMyZmPTOUlClk6PYPH+Ce5JiCb/h
+origin example.com/foo
+
+# known log, different key
+# gentest seed cf8477f7158ac47b018a55fda4bd1af29b0e864cdd3fd495efa477639d0b690c
+vkey sigsum.org/v1/tree/80f121ea8f6364ca8c19212d7caf4e235d00aa34a98d86b60204c24f981a4933+a05ec139+ASZ0biMUCMjOMmt0NyD8g6Mt6RGZGXJU/ZpM5Oy0otex
+origin sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4cd2e9b8702
+
+-- list-logs.jsonl --
+{"origin":"example.com/foo","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/2ef59132082631d13e353b5ae49b22bc51a9bd59f41a2d570960a9658c1ed151+e2137795+ATp+37IPHc3SbPGzFMyZmPTOUlClk6PYPH+Ce5JiCb/h"]}
+{"origin":"sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4cd2e9b8702","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4cd2e9b8702+9bc54c7f+AVv6q3xDaHxI2aTemqEb7W6ZcbO7QbTqTr20thOqfqsw"]}
+{"origin":"sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120+7f693d84+AUlxeri80AO7/4j/+OGo+5M2Sud0ktFg34uZl2fZnjJT"]}
