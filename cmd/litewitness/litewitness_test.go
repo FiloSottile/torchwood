@@ -6,11 +6,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"syscall"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,12 +18,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	os.Exit(testscript.RunMain(m, map[string]func() int{
-		"litewitness": func() (exitCode int) {
+	testscript.Main(m, map[string]func(){
+		"litewitness": func() {
 			main()
-			return 0
 		},
-	}))
+	})
 }
 
 func TestScript(t *testing.T) {
