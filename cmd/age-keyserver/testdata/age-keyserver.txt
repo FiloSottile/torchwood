@@ -1,0 +1,121 @@
+# start age-keyserver with test hCaptcha secret
+env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
+exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13892 &srv&
+waitfor http://localhost:13892/
+
+# test basic pages are accessible
+exec hurl --test --error-format long pages.hurl
+
+# test lookup endpoints
+exec hurl --test --error-format long lookup.hurl
+
+# test login endpoint
+exec hurl --test --error-format long login.hurl
+
+# test API endpoints with invalid auth
+exec hurl --test --error-format long api-invalid-auth.hurl
+
+# check that age-keyserver shut down cleanly
+killall
+wait srv
+stderr 'shutting down'
+
+
+-- pages.hurl --
+# Test home page
+GET http://localhost:13892/
+HTTP 200
+
+# Test manage page
+GET http://localhost:13892/manage
+HTTP 200
+
+# Test static files are accessible
+GET http://localhost:13892/static/style.css
+HTTP 200
+
+
+-- lookup.hurl --
+# Test lookup - missing email parameter
+GET http://localhost:13892/api/lookup
+HTTP 400
+[Asserts]
+body contains "Email parameter required"
+
+# Test lookup - key not found
+GET http://localhost:13892/api/lookup?email=nonexistent@example.com
+HTTP 404
+[Asserts]
+body contains "No key found"
+
+
+-- login.hurl --
+# Test login - missing email
+POST http://localhost:13892/login
+[FormParams]
+h-captcha-response: 10000000-aaaa-bbbb-cccc-000000000001
+HTTP 400
+[Asserts]
+body contains "Email is required"
+
+# Test login - missing captcha
+POST http://localhost:13892/login
+[FormParams]
+email: test@example.com
+HTTP 400
+[Asserts]
+body contains "Captcha verification failed"
+
+# Test login - invalid captcha
+POST http://localhost:13892/login
+[FormParams]
+email: test@example.com
+h-captcha-response: invalid-captcha-token
+HTTP 400
+[Asserts]
+body contains "Captcha verification failed"
+
+# Test login - valid request with test hCaptcha response
+POST http://localhost:13892/login
+[FormParams]
+email: test@example.com
+h-captcha-response: 10000000-aaaa-bbbb-cccc-000000000001
+HTTP 200
+[Asserts]
+body contains "test@example.com"
+
+
+-- api-invalid-auth.hurl --
+# Test verify-token with invalid token
+POST http://localhost:13892/api/verify-token
+Content-Type: application/json
+{
+  "email": "test@example.com",
+  "sig": "invalid-sig",
+  "ts": "123456789"
+}
+HTTP 401
+[Asserts]
+body contains "Invalid or expired"
+
+# Test setkey with invalid auth
+POST http://localhost:13892/setkey
+[FormParams]
+email: test@example.com
+sig: invalid-sig
+ts: 123456789
+pubkey: age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+HTTP 401
+[Asserts]
+body contains "Invalid or expired"
+
+# Test setkey with expired token (timestamp from 2020)
+POST http://localhost:13892/setkey
+[FormParams]
+email: test@example.com
+sig: somevalidsig
+ts: 1577836800
+pubkey: age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+HTTP 401
+[Asserts]
+body contains "Invalid or expired"

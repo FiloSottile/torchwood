@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Manage your key - age Keyserver</title>
+	<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+	<h1>age Keyserver</h1>
+
+	<div class="section" id="loading">
+		<p>Authenticating...</p>
+	</div>
+
+	<div class="section" id="close-tab" style="display: none;">
+		<h2>Success!</h2>
+		<p>You can close this tab and return to the previous tab to continue.</p>
+	</div>
+
+	<div id="management-ui" style="display: none;">
+		<p>Logged in as <strong id="user-email"></strong></p>
+
+		<div class="section">
+			<div id="current-key-section" style="display: none;">
+				<h2>Current public key</h2>
+				<p class="code" id="current-key"></p>
+				<p class="dimmed" style="margin-top: 0.5rem;">Last updated: <span id="updated-at"></span></p>
+			</div>
+			<div id="no-key-section" style="display: none;">
+				<p>You don't have a public key set yet.</p>
+			</div>
+
+			<h2 id="form-title">Set your age public key</h2>
+			<form id="setkey-form" action="/setkey" method="POST">
+				<input type="hidden" name="email" id="form-email">
+				<input type="hidden" name="sig" id="form-sig">
+				<input type="hidden" name="ts" id="form-ts">
+
+				<label for="pubkey">age public key (age1...)</label>
+				<textarea id="pubkey" name="pubkey" placeholder="age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"></textarea>
+				<p class="dimmed">Enter your age public key. You can generate a keypair with: <code>age-keygen</code></p>
+
+				<button type="submit" id="submit-btn">Set key</button>
+			</form>
+
+			<form id="delete-form" action="/setkey" method="POST" style="margin-top: 1rem; display: none;">
+				<input type="hidden" name="email" id="delete-email">
+				<input type="hidden" name="sig" id="delete-sig">
+				<input type="hidden" name="ts" id="delete-ts">
+				<input type="hidden" name="pubkey" value="">
+				<button type="submit" style="background: var(--bg); border-color: #664444; color: #ff6b6b;">Delete key</button>
+			</form>
+		</div>
+
+		<div class="footer">
+			<p>Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a></p>
+		</div>
+	</div>
+
+	<div class="section" id="error" style="display: none;">
+		<p class="error" id="error-message"></p>
+	</div>
+
+	<script>
+		const BROADCAST_CHANNEL_NAME = 'age-keyserver-auth';
+		const CONFIRMATION_TIMEOUT = 2000; // 2 seconds
+
+		async function init() {
+			// Extract token from URL fragment
+			const fragment = window.location.hash.substring(1);
+			if (!fragment) {
+				showError('Invalid login link');
+				return;
+			}
+
+			const params = new URLSearchParams(fragment);
+			const email = params.get('email');
+			const ts = params.get('ts');
+			const sig = params.get('sig');
+
+			if (!email || !ts || !sig) {
+				showError('Invalid login link');
+				return;
+			}
+
+			const tokenData = { email, ts, sig };
+
+			// Try to broadcast to other tabs
+			const broadcasted = await tryBroadcast(tokenData);
+
+			if (broadcasted) {
+				// Show "close this tab" message
+				document.getElementById('loading').style.display = 'none';
+				document.getElementById('close-tab').style.display = 'block';
+			} else {
+				// No other tab responded, load management UI here
+				await loadManagementUI(tokenData);
+			}
+		}
+
+		async function tryBroadcast(tokenData) {
+			return new Promise((resolve) => {
+				const channel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
+				let confirmed = false;
+
+				// Listen for confirmation
+				channel.addEventListener('message', (event) => {
+					if (event.data.type === 'token-received-confirmation') {
+						confirmed = true;
+						channel.close();
+						resolve(true);
+					}
+				});
+
+				// Broadcast the token
+				channel.postMessage({
+					type: 'auth-token',
+					...tokenData
+				});
+
+				// Wait for confirmation with timeout
+				setTimeout(() => {
+					if (!confirmed) {
+						channel.close();
+						resolve(false);
+					}
+				}, CONFIRMATION_TIMEOUT);
+			});
+		}
+
+		async function loadManagementUI(tokenData) {
+			try {
+				// Verify token with server
+				const resp = await fetch('/api/verify-token', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(tokenData)
+				});
+
+				if (!resp.ok) {
+					const text = await resp.text();
+					showError(text || 'Invalid or expired login link');
+					return;
+				}
+
+				const data = await resp.json();
+
+				// Populate management UI
+				document.getElementById('user-email').textContent = tokenData.email;
+				document.getElementById('form-email').value = tokenData.email;
+				document.getElementById('form-sig').value = tokenData.sig;
+				document.getElementById('form-ts').value = tokenData.ts;
+
+				if (data.currentKey) {
+					document.getElementById('current-key-section').style.display = 'block';
+					document.getElementById('current-key').textContent = data.currentKey;
+
+					// Format and display the updated timestamp
+					if (data.updatedAt) {
+						const date = new Date(data.updatedAt * 1000);
+						document.getElementById('updated-at').textContent = date.toLocaleString();
+					}
+
+					document.getElementById('form-title').textContent = 'Update your age public key';
+					document.getElementById('submit-btn').textContent = 'Update key';
+					document.getElementById('pubkey').value = data.currentKey;
+
+					// Show delete form
+					document.getElementById('delete-form').style.display = 'block';
+					document.getElementById('delete-email').value = tokenData.email;
+					document.getElementById('delete-sig').value = tokenData.sig;
+					document.getElementById('delete-ts').value = tokenData.ts;
+				} else {
+					document.getElementById('no-key-section').style.display = 'block';
+				}
+
+				// Show management UI
+				document.getElementById('loading').style.display = 'none';
+				document.getElementById('management-ui').style.display = 'block';
+			} catch (err) {
+				showError('Error loading management UI: ' + err.message);
+			}
+		}
+
+		function showError(message) {
+			document.getElementById('loading').style.display = 'none';
+			document.getElementById('error').style.display = 'block';
+			document.getElementById('error-message').textContent = message;
+		}
+
+		// Initialize on page load
+		init();
+	</script>
+</body>
+</html>

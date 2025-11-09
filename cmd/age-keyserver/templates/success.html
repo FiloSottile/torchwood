@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Success - age Keyserver</title>
+	<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+	<h1>Success!</h1>
+
+	<div class="section">
+		{{if .Pubkey}}
+		<p class="success">✓ Your public key has been updated for <strong>{{.Email}}</strong></p>
+		<p><strong>Public key:</strong></p>
+		<p class="code">{{.Pubkey}}</p>
+		<p style="margin-top: 1rem;">Anyone can now look up your public key using your email address.</p>
+		{{else}}
+		<p class="success">✓ Your public key has been deleted for <strong>{{.Email}}</strong></p>
+		{{end}}
+	</div>
+
+	<p><a href="/">← Back to home</a></p>
+
+	<div class="footer">
+		<p>Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a></p>
+	</div>
+</body>
+</html>

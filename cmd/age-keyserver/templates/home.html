@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>age Keyserver</title>
+	<link rel="stylesheet" href="/static/style.css">
+	<script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+</head>
+<body>
+	<h1>age Keyserver</h1>
+
+	<p>A simple public keyserver for <a href="https://age-encryption.org" target="_blank">age</a> public keys.</p>
+
+	<div class="section lookup-section">
+		<h2>Look up a public key</h2>
+		<form id="lookup-form">
+			<input type="email" id="lookup-email" name="email" required placeholder="joe@example.com" autofocus>
+			<button type="submit">Look up key</button>
+		</form>
+		<div id="lookup-result"></div>
+	</div>
+
+	<div class="section cli-example-section">
+		<h2>Use from the command line</h2>
+		<p>Encrypt a file to someone's public key directly:</p>
+		<div class="key-result">
+			<code class="pubkey-display">age -r $(go run filippo.io/torchwood/cmd/age-keylookup@main joe@example.com)</code>
+			<button id="copy-cli-btn" onclick="copyCliExample()" class="copy-button">Copy</button>
+		</div>
+	</div>
+
+	<div class="section">
+		<h2>Submit or manage your key</h2>
+		<form action="/login" method="POST">
+			<input type="email" id="email" name="email" required placeholder="you@example.com">
+
+			<div class="h-captcha" data-sitekey="{{.HCaptchaSitekey}}"></div>
+
+			<button type="submit">Send login link</button>
+		</form>
+	</div>
+
+	<div class="footer">
+		<p>Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a></p>
+	</div>
+
+	<script>
+		function copyCliExample() {
+			const cliCommand = 'age -r $(go run filippo.io/torchwood/cmd/age-keylookup@main joe@example.com)';
+			navigator.clipboard.writeText(cliCommand).then(() => {
+				const btn = document.getElementById('copy-cli-btn');
+				const originalText = btn.textContent;
+				btn.textContent = 'Copied!';
+				btn.style.background = 'var(--button-bg)';
+				setTimeout(() => {
+					btn.textContent = originalText;
+					btn.style.background = '';
+				}, 2000);
+			}).catch(err => {
+				console.error('Failed to copy:', err);
+			});
+		}
+
+		function copyToClipboard(text) {
+			navigator.clipboard.writeText(text).then(() => {
+				const btn = document.getElementById('copy-btn');
+				const originalText = btn.textContent;
+				btn.textContent = 'Copied!';
+				btn.style.background = 'var(--button-bg)';
+				setTimeout(() => {
+					btn.textContent = originalText;
+					btn.style.background = '';
+				}, 2000);
+			}).catch(err => {
+				console.error('Failed to copy:', err);
+			});
+		}
+
+		document.getElementById('lookup-form').addEventListener('submit', async (e) => {
+			e.preventDefault();
+			const email = document.getElementById('lookup-email').value;
+			const resultDiv = document.getElementById('lookup-result');
+
+			resultDiv.innerHTML = '<p style="margin-top: 1rem;" class="dimmed">Looking up...</p>';
+
+			try {
+				const resp = await fetch('/api/lookup?email=' + encodeURIComponent(email));
+				if (resp.ok) {
+					const data = await resp.json();
+					resultDiv.innerHTML = `
+						<div style="margin-top: 1.5rem;">
+							<p><strong>Public key for <u>${email}</u>:</strong></p>
+							<div class="key-result">
+								<code class="pubkey-display">${data.pubkey}</code>
+								<button id="copy-btn" onclick="copyToClipboard('${data.pubkey}')" class="copy-button">Copy</button>
+							</div>
+						</div>
+					`;
+				} else {
+					resultDiv.innerHTML = '<p style="margin-top: 1rem;" class="error">No key found for this email address.</p>';
+				}
+			} catch (err) {
+				resultDiv.innerHTML = '<p style="margin-top: 1rem;" class="error">Error looking up key.</p>';
+			}
+		});
+	</script>
+</body>
+</html>

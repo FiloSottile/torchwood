@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Check your email - age Keyserver</title>
+	<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+	<h1>Check your email</h1>
+
+	<div class="section">
+		<p class="success">✓ We've sent a login link to <strong>{{.Email}}</strong></p>
+		<p>Click the link in the email to manage your age public key. The link will expire in 10 minutes.</p>
+	</div>
+
+	<p><a href="/">← Back to home</a></p>
+
+	<div class="footer">
+		<p>Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a></p>
+	</div>
+
+	<script>
+		const BROADCAST_CHANNEL_NAME = 'age-keyserver-auth';
+
+		// Listen for auth tokens from other tabs via BroadcastChannel
+		const authChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
+		authChannel.addEventListener('message', (event) => {
+			if (event.data.type === 'auth-token') {
+				const { email, ts, sig } = event.data;
+
+				// Send confirmation back to the sender tab
+				authChannel.postMessage({
+					type: 'token-received-confirmation'
+				});
+
+				// Redirect to manage page with the token
+				window.location.href = `/manage#email=${encodeURIComponent(email)}&ts=${encodeURIComponent(ts)}&sig=${encodeURIComponent(sig)}`;
+			}
+		});
+	</script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# Test age-keylookup against the actual age-keyserver
+
+# Start age-keyserver
+env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
+env AGE_KEYSERVER_URL=http://localhost:13893
+env AGE_KEYSERVER_HMAC_FILE=$WORK/hmac.txt
+exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13893 &srv&
+waitfor http://localhost:13893/
+
+# Insert a test key via HTTP endpoint
+insertkey http://localhost:13893 test@example.com age1m0lsd7ywk3c66a3pwxsrj86sw0v8sxzwpxf97xhseepsud6fkues0rxq9h
+
+# Lookup the key using the CLI
+exec age-keylookup test@example.com
+stdout 'age1m0lsd7ywk3c66a3pwxsrj86sw0v8sxzwpxf97xhseepsud6fkues0rxq9h'
+
+# Test lookup for non-existent key (should fail)
+! exec age-keylookup nonexistent@example.com
+stderr 'no key found'
+
+# Insert multiple keys
+insertkey http://localhost:13893 alice@example.com age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+insertkey http://localhost:13893 bob@example.com age1lggyhqrw2nlhcxprm67z43rta597azn8gknawjehu9d9dl0jq3yqqvfafg
+insertkey http://localhost:13893 charlie@example.com age1v9mqpk5wx65vxqz429s93uamfu2z0rm8y9az4kfkt4dp6tua8dhqvh3lff
+
+# Lookup each key
+exec age-keylookup alice@example.com
+stdout 'age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p'
+
+exec age-keylookup bob@example.com
+stdout 'age1lggyhqrw2nlhcxprm67z43rta597azn8gknawjehu9d9dl0jq3yqqvfafg'
+
+exec age-keylookup charlie@example.com
+stdout 'age1v9mqpk5wx65vxqz429s93uamfu2z0rm8y9az4kfkt4dp6tua8dhqvh3lff'
+
+# Stop the server
+killall
+wait srv
+stderr 'shutting down'

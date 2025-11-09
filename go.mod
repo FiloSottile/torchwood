@@ -3,6 +3,7 @@ module filippo.io/torchwood
 go 1.24.0
 
 require (
+	filippo.io/age v1.2.1
 	github.com/cheggaaa/pb/v3 v3.1.5
 	github.com/rogpeppe/go-internal v1.14.1
 	github.com/transparency-dev/tessera v1.0.1
