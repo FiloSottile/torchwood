@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,20 +9,29 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
+
+	"filippo.io/torchwood"
+	"golang.org/x/mod/sumdb/note"
+	"golang.org/x/mod/sumdb/tlog"
 )
 
 const (
-	defaultKeyserverURL = "https://keyserver.geomys.org"
+	defaultKeyserverURL    = "https://keyserver.geomys.org"
+	defaultKeyserverPubkey = "keyserver.geomys.org+16b31509+ARLJ+pmTj78HzTeBj04V+LVfB+GFAQyrg54CRIju7Nn8"
 )
 
 func main() {
+	allFlag := flag.Bool("all", false, "list all public keys in the transparency log")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "Usage: age-keylookup <email>\n")
+		fmt.Fprintf(os.Stderr, "Usage: age-keylookup [-all] <email>\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "Look up an age public key by email address.\n")
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "With -all, it enumerates all public keys in the transparency log.\n")
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "Example:\n")
 		fmt.Fprintf(os.Stderr, "  age-keylookup filippo@example.com\n")
@@ -29,6 +39,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "Environment:\n")
 		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_URL     Default keyserver URL\n")
+		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_PUBKEY  Default keyserver transparency log vkey\n")
 		os.Exit(2)
 	}
 
@@ -40,7 +51,33 @@ func main() {
 		server = defaultKeyserverURL
 	}
 
-	pubkey, err := lookupKey(server, email)
+	vkey := os.Getenv("AGE_KEYSERVER_PUBKEY")
+	if vkey == "" {
+		vkey = defaultKeyserverPubkey
+	}
+	v, err := note.NewVerifier(vkey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid keyserver public key: %v\n", err)
+		os.Exit(1)
+	}
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(v.Name()), torchwood.SingleVerifierPolicy(v))
+
+	// Normalize email
+	email = strings.TrimSpace(strings.ToLower(email))
+
+	if *allFlag {
+		pubkeys, err := monitorLog(server, policy, email)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		for _, pk := range pubkeys {
+			fmt.Println(pk)
+		}
+		return
+	}
+
+	pubkey, err := lookupKey(server, policy, email)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -49,7 +86,7 @@ func main() {
 	fmt.Println(pubkey)
 }
 
-func lookupKey(serverURL, email string) (string, error) {
+func lookupKey(serverURL string, policy torchwood.Policy, email string) (string, error) {
 	// Build the lookup URL
 	lookupURL := serverURL + "/api/lookup?email=" + url.QueryEscape(email)
 
@@ -79,6 +116,7 @@ func lookupKey(serverURL, email string) (string, error) {
 	var result struct {
 		Email  string `json:"email"`
 		Pubkey string `json:"pubkey"`
+		Proof  string `json:"proof"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -92,5 +130,53 @@ func lookupKey(serverURL, email string) (string, error) {
 		return "", fmt.Errorf("empty public key returned")
 	}
 
+	// Verify spicy signature
+	entry := fmt.Appendf(nil, "%s\n%s\n", result.Email, result.Pubkey)
+	if err := torchwood.VerifyProof(policy, tlog.RecordHash(entry), []byte(result.Proof)); err != nil {
+		return "", fmt.Errorf("failed to verify key proof: %w", err)
+	}
+
 	return result.Pubkey, nil
+}
+
+func monitorLog(serverURL string, policy torchwood.Policy, email string) ([]string, error) {
+	f, err := torchwood.NewTileFetcher(serverURL+"/tlog", torchwood.WithUserAgent("age-keylookup/1.0"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tile fetcher: %w", err)
+	}
+	c, err := torchwood.NewClient(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create torchwood client: %w", err)
+	}
+
+	// Fetch and verify checkpoint
+	signedCheckpoint, err := f.ReadEndpoint(context.Background(), "checkpoint")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read checkpoint: %w", err)
+	}
+	checkpoint, _, err := torchwood.VerifyCheckpoint(signedCheckpoint, policy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse checkpoint: %w", err)
+	}
+
+	// Fetch all entries up to the checkpoint size
+	var pubkeys []string
+	for i, entry := range c.AllEntries(context.Background(), checkpoint.Tree, 0) {
+		e, rest, ok := strings.Cut(string(entry), "\n")
+		if !ok {
+			return nil, fmt.Errorf("malformed log entry %d: %q", i, string(entry))
+		}
+		k, rest, ok := strings.Cut(rest, "\n")
+		if !ok || rest != "" {
+			return nil, fmt.Errorf("malformed log entry %d: %q", i, string(entry))
+		}
+		if e == email {
+			pubkeys = append(pubkeys, k)
+		}
+	}
+	if c.Err() != nil {
+		return nil, fmt.Errorf("error fetching log entries: %w", c.Err())
+	}
+
+	return pubkeys, nil
 }

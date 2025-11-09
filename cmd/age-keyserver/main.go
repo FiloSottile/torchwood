@@ -21,9 +21,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"testing"
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/torchwood"
+	"filippo.io/torchwood/tesserax"
+	"github.com/transparency-dev/tessera"
+	"github.com/transparency-dev/tessera/storage/posix"
+	"golang.org/x/mod/sumdb/note"
+	"golang.org/x/mod/sumdb/tlog"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"zombiezen.com/go/sqlite"
@@ -35,6 +42,7 @@ var (
 	embeddedFS embed.FS
 
 	dbPath     = flag.String("db", "keyserver.sqlite3", "path to SQLite database")
+	logPath    = flag.String("logdir", "keyserver-tlog", "directory for transparency log")
 	listenAddr = flag.String("listen", "localhost:13889", "address to listen on")
 )
 
@@ -43,11 +51,16 @@ type Server struct {
 	templates *template.Template
 	hmacKey   []byte
 	baseURL   string
+	reader    tessera.LogReader
+	appender  *tessera.Appender
+	awaiter   *tessera.PublicationAwaiter
+	policy    torchwood.Policy
 }
 
 type KeyData struct {
 	Pubkey    string `json:"pubkey"`
 	UpdatedAt int64  `json:"updated_at"`
+	LogIndex  int64  `json:"log_index"`
 }
 
 const (
@@ -61,6 +74,47 @@ const (
 
 func main() {
 	flag.Parse()
+	ctx := context.Background()
+
+	s, err := note.NewSigner(os.Getenv("LOG_KEY"))
+	if err != nil {
+		log.Fatalln("failed to create checkpoint signer:", err)
+	}
+	v, err := torchwood.NewVerifierFromSigner(os.Getenv("LOG_KEY"))
+	if err != nil {
+		log.Fatalln("failed to create checkpoint verifier:", err)
+	}
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(v.Name()),
+		torchwood.SingleVerifierPolicy(v))
+
+	driver, err := posix.New(ctx, posix.Config{
+		Path: *logPath,
+	})
+	if err != nil {
+		log.Fatalln("failed to create log storage driver:", err)
+	}
+
+	// Since this is a low-traffic but interactive server, disable batching to
+	// remove integration latency for the first request. Keep a 1s checkpoint
+	// interval not to hit the witnesses too often; this will be observed only
+	// if two requests come in quick succession. Finally, only publish a
+	// checkpoint once a day if there are no new entries, making the average qps
+	// on witnesses low. Poll for new checkpoints quickly since it should be
+	// just a read from a hot filesystem cache.
+	checkpointInterval := 1 * time.Second
+	if testing.Testing() {
+		checkpointInterval = 100 * time.Millisecond
+	}
+	appender, shutdown, logReader, err := tessera.NewAppender(ctx, driver, tessera.NewAppendOptions().
+		WithCheckpointSigner(s).
+		WithBatching(1, tessera.DefaultBatchMaxAge).
+		WithCheckpointInterval(checkpointInterval).
+		WithCheckpointRepublishInterval(24*time.Hour))
+	if err != nil {
+		log.Fatalln("failed to create log appender:", err)
+	}
+	defer shutdown(context.Background())
+	awaiter := tessera.NewPublicationAwaiter(ctx, logReader.ReadCheckpoint, 25*time.Millisecond)
 
 	// Check for development vs production mode
 	postmarkToken := os.Getenv("POSTMARK_TOKEN")
@@ -111,6 +165,10 @@ func main() {
 		templates: templates,
 		hmacKey:   hmacKey,
 		baseURL:   baseURL,
+		reader:    logReader,
+		appender:  appender,
+		awaiter:   awaiter,
+		policy:    policy,
 	}
 
 	// Set up routes
@@ -128,6 +186,10 @@ func main() {
 		log.Fatalln("failed to get static subdirectory:", err)
 	}
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticFS))))
+
+	// Serve tlog-tiles log
+	fs := http.StripPrefix("/tlog/", http.FileServer(http.Dir(*logPath)))
+	mux.Handle("GET /tlog/", fs)
 
 	// Start server with h2c support
 	log.Println("")
@@ -188,6 +250,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if email == "" {
 		http.Error(w, "Email is required", http.StatusBadRequest)
+		return
+	}
+	// Emails are technically case sensitive, but users are unlikely to monitor
+	// all case variations, so we normalize to lowercase. We do it before
+	// sending the login link, so normalization can't lead to impersonation.
+	email = strings.ToLower(email)
+	if strings.ContainsAny(email, "\n") {
+		http.Error(w, "Invalid email format", http.StatusBadRequest)
 		return
 	}
 
@@ -283,18 +353,37 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate age public key
+	var proof string
 	if pubkey != "" {
 		if _, err := age.ParseX25519Recipient(pubkey); err != nil {
 			http.Error(w, "Invalid age public key format", http.StatusBadRequest)
 			return
 		}
 
+		// Add to transparency log
+		entry := tessera.NewEntry(fmt.Appendf(nil, "%s\n%s\n", email, pubkey))
+		index, _, err := s.awaiter.Await(r.Context(), s.appender.Add(r.Context(), entry))
+		if err != nil {
+			http.Error(w, "Failed to add to transparency log", http.StatusInternalServerError)
+			log.Printf("transparency log error: %v", err)
+			return
+		}
+
 		// Store in database
-		if err := s.storeKey(email, pubkey); err != nil {
+		if err := s.storeKey(email, pubkey, int64(index.Index)); err != nil {
 			http.Error(w, "Failed to store key", http.StatusInternalServerError)
 			log.Printf("database error: %v", err)
 			return
 		}
+
+		// Generate proof for success page
+		proofBytes, err := s.makeSpicySignature(r.Context(), int64(index.Index))
+		if err != nil {
+			http.Error(w, "Failed to create proof", http.StatusInternalServerError)
+			log.Printf("proof error: %v", err)
+			return
+		}
+		proof = string(proofBytes)
 	} else {
 		// Delete key
 		if err := s.deleteKey(email); err != nil {
@@ -308,6 +397,7 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 	if err := s.templates.ExecuteTemplate(w, "success.html", map[string]string{
 		"Email":  email,
 		"Pubkey": pubkey,
+		"Proof":  proof,
 	}); err != nil {
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		log.Printf("template error: %v", err)
@@ -332,12 +422,37 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	proof, err := s.makeSpicySignature(r.Context(), data.LogIndex)
+	if err != nil {
+		http.Error(w, "Failed to create proof", http.StatusInternalServerError)
+		log.Printf("proof error: %v", err)
+		return
+	}
+
 	// Return as JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"email":  email,
 		"pubkey": data.Pubkey,
+		"proof":  string(proof),
 	})
+}
+
+func (s *Server) makeSpicySignature(ctx context.Context, index int64) ([]byte, error) {
+	checkpoint, err := s.reader.ReadCheckpoint(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read checkpoint: %v", err)
+	}
+	c, _, err := torchwood.VerifyCheckpoint(checkpoint, s.policy)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse checkpoint: %v", err)
+	}
+	p, err := tlog.ProveRecord(c.N, index, torchwood.TileHashReaderWithContext(
+		ctx, c.Tree, tesserax.NewTileReader(s.reader)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create proof: %v", err)
+	}
+	return torchwood.FormatProof(index, p, checkpoint), nil
 }
 
 func (s *Server) generateHMAC(email string, ts int64) string {
@@ -410,10 +525,11 @@ func (s *Server) getKeyData(email string) (*KeyData, error) {
 	return &data, nil
 }
 
-func (s *Server) storeKey(email, pubkey string) error {
+func (s *Server) storeKey(email, pubkey string, index int64) error {
 	data := KeyData{
 		Pubkey:    pubkey,
 		UpdatedAt: time.Now().Unix(),
+		LogIndex:  index,
 	}
 
 	jsonData, err := json.Marshal(data)

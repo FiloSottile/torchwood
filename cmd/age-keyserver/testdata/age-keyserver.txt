@@ -1,10 +1,14 @@
 # start age-keyserver with test hCaptcha secret
 env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
+env LOG_KEY=PRIVATE+KEY+example.com+5800330c+AaAoObvamoDOmN6c30Xh9pH1e/xqKcsU+fNmthQ8qmvM
 exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13892 &srv&
 waitfor http://localhost:13892/
 
 # test basic pages are accessible
 exec hurl --test --error-format long pages.hurl
+
+# test tlog endpoints
+exec hurl --test --error-format long tlog.hurl
 
 # test lookup endpoints
 exec hurl --test --error-format long lookup.hurl
@@ -33,6 +37,13 @@ HTTP 200
 # Test static files are accessible
 GET http://localhost:13892/static/style.css
 HTTP 200
+
+
+-- tlog.hurl --
+GET http://localhost:13892/tlog/checkpoint
+HTTP 200
+[Asserts]
+body contains "example.com"
 
 
 -- lookup.hurl --

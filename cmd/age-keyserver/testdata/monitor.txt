@@ -1,0 +1,29 @@
+# Test monitoring mode
+
+# Start age-keyserver
+env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
+env AGE_KEYSERVER_URL=http://localhost:13894
+env AGE_KEYSERVER_HMAC_FILE=$WORK/hmac.txt
+env LOG_KEY=PRIVATE+KEY+example.com+5800330c+AaAoObvamoDOmN6c30Xh9pH1e/xqKcsU+fNmthQ8qmvM
+env AGE_KEYSERVER_PUBKEY=example.com+5800330c+ARPRGiaIwfx6xka5nXhdD/rqojPMjrjhm7OCuy+03Ymz
+exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13894 &srv&
+waitfor http://localhost:13894/
+
+# Insert multiple keys
+insertkey http://localhost:13894 alice@example.com age1cg0zq9v96hm6wt7rgx4zavm34x474vrxlxsq5wvakxwjfmuhyftq0f6szk
+insertkey http://localhost:13894 bob@example.com age1wn8rtmayctvsfupmg6f0pvx5gtjqkmyw5rrp57l9x7cnay4dpsksyazwm9
+insertkey http://localhost:13894 alice@example.com age1h24cj29vfe5t0wq9sp88fawatczsalq33qnh53wzpa03y8eeka7suwjcfs
+
+# Lookup latest key
+exec age-keylookup alice@example.com
+stdout 'age1h24cj29vfe5t0wq9sp88fawatczsalq33qnh53wzpa03y8eeka7suwjcfs'
+
+exec age-keylookup -all alice@example.com
+stdout 'age1cg0zq9v96hm6wt7rgx4zavm34x474vrxlxsq5wvakxwjfmuhyftq0f6szk'
+stdout 'age1h24cj29vfe5t0wq9sp88fawatczsalq33qnh53wzpa03y8eeka7suwjcfs'
+! stdout 'age1wn8rtmayctvsfupmg6f0pvx5gtjqkmyw5rrp57l9x7cnay4dpsksyazwm9'
+
+# Stop the server
+killall
+wait srv
+stderr 'shutting down'

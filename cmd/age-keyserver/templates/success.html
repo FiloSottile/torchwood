@@ -15,6 +15,16 @@
 		<p><strong>Public key:</strong></p>
 		<p class="code">{{.Pubkey}}</p>
 		<p style="margin-top: 1rem;">Anyone can now look up your public key using your email address.</p>
+
+		{{if .Proof}}
+		<details style="margin-top: 1.5rem;">
+			<summary style="cursor: pointer; font-weight: 500;">Transparency log proof</summary>
+			<div style="margin-top: 0.5rem;">
+				<p class="dimmed" style="margin-bottom: 0.5rem;">The CLI automatically verifies this proof when looking up keys.</p>
+				<pre style="background: var(--bg); padding: 1rem; border: 1px solid var(--border); border-radius: 4px; overflow-x: auto; font-size: 0.85rem;">{{.Proof}}</pre>
+			</div>
+		</details>
+		{{end}}
 		{{else}}
 		<p class="success">✓ Your public key has been deleted for <strong>{{.Email}}</strong></p>
 		{{end}}
@@ -23,7 +33,11 @@
 	<p><a href="/">← Back to home</a></p>
 
 	<div class="footer">
-		<p>Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a></p>
+		<p>
+			Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a>,
+			about <a href="https://words.filippo.io/keyserver-tlog" target="_blank">transparency logs</a>,
+			or read the <a href="https://github.com/FiloSottile/torchwood/tree/main/cmd/age-keyserver" target="_blank">source code</a>.
+		</p>
 	</div>
 </body>
 </html>

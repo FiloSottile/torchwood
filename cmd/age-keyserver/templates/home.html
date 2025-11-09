@@ -10,7 +10,7 @@
 <body>
 	<h1>age Keyserver</h1>
 
-	<p>A simple public keyserver for <a href="https://age-encryption.org" target="_blank">age</a> public keys.</p>
+	<p>A <a href="https://words.filippo.io/keyserver-tlog" target="_blank">transparent</a> keyserver for <a href="https://age-encryption.org" target="_blank">age</a> public keys.</p>
 
 	<div class="section lookup-section">
 		<h2>Look up a public key</h2>
@@ -42,7 +42,11 @@
 	</div>
 
 	<div class="footer">
-		<p>Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a></p>
+		<p>
+			Learn more about the <a href="https://age-encryption.org" target="_blank">age encryption tool</a>,
+			about <a href="https://words.filippo.io/keyserver-tlog" target="_blank">transparency logs</a>,
+			or read the <a href="https://github.com/FiloSottile/torchwood/tree/main/cmd/age-keyserver" target="_blank">source code</a>.
+		</p>
 	</div>
 
 	<script>
@@ -95,6 +99,13 @@
 								<code class="pubkey-display">${data.pubkey}</code>
 								<button id="copy-btn" onclick="copyToClipboard('${data.pubkey}')" class="copy-button">Copy</button>
 							</div>
+							<details style="margin-top: 1rem;">
+								<summary style="cursor: pointer; color: var(--text); font-weight: 500;">Transparency log proof</summary>
+								<div style="margin-top: 0.5rem;">
+									<p class="dimmed" style="margin-bottom: 0.5rem;">The CLI automatically verifies this proof when looking up keys.</p>
+									<pre style="background: var(--bg); padding: 1rem; border: 1px solid var(--border); border-radius: 4px; overflow-x: auto; font-size: 0.85rem;">${data.proof}</pre>
+								</div>
+							</details>
 						</div>
 					`;
 				} else {
