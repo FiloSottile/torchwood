@@ -72,7 +72,13 @@ const (
 		CREATE TABLE IF NOT EXISTS keys (
 			email TEXT PRIMARY KEY,
 			json_data BLOB
-		) STRICT;`
+		) STRICT;
+		CREATE TABLE IF NOT EXISTS history (
+			email TEXT NOT NULL,
+			pubkey TEXT NOT NULL
+		) STRICT;
+		CREATE INDEX IF NOT EXISTS history_email_idx ON history(email);
+	`
 )
 
 func main() {
@@ -146,7 +152,7 @@ func main() {
 	dbpool, err := sqlitex.NewPool(*dbPath, sqlitex.PoolOptions{
 		PoolSize: 10,
 		PrepareConn: func(conn *sqlite.Conn) error {
-			return sqlitex.ExecuteTransient(conn, schema, nil)
+			return sqlitex.ExecScript(conn, schema)
 		},
 	})
 	if err != nil {
@@ -376,10 +382,18 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 
 		// Compute VRF hash and proof
 		vrfProof := s.vrf.Prove([]byte(email))
-		vrfHash := base64.StdEncoding.EncodeToString(vrfProof.Hash())
+
+		// Keep track of the unhashed key
+		if err := s.storeHistory(email, pubkey); err != nil {
+			http.Error(w, "Failed to store key history", http.StatusInternalServerError)
+			log.Printf("database error: %v", err)
+			return
+		}
 
 		// Add to transparency log
-		entry := tessera.NewEntry(fmt.Appendf(nil, "%s\n%s\n", vrfHash, pubkey))
+		h := sha256.New()
+		h.Write([]byte(pubkey))
+		entry := tessera.NewEntry(h.Sum(vrfProof.Hash())) // vrf-r255(email) || SHA-256(pubkey)
 		index, _, err := s.awaiter.Await(r.Context(), s.appender.Add(r.Context(), entry))
 		if err != nil {
 			http.Error(w, "Failed to add to transparency log", http.StatusInternalServerError)
@@ -463,11 +477,19 @@ func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	history, err := s.getHistory(email)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		log.Printf("database error: %v", err)
+		return
+	}
+
 	// Return as JSON
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"email":     email,
 		"vrf_proof": s.vrf.Prove([]byte(email)).Bytes(),
+		"history":   history,
 	})
 }
 
@@ -596,6 +618,47 @@ func (s *Server) deleteKey(email string) error {
 
 	return sqlitex.Execute(conn, "DELETE FROM keys WHERE email = ?", &sqlitex.ExecOptions{
 		Args: []any{email},
+	})
+}
+
+func (s *Server) getHistory(email string) ([]string, error) {
+	conn, err := s.dbpool.Take(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	defer s.dbpool.Put(conn)
+
+	var pubkeys []string
+	err = sqlitex.Execute(conn, `
+		SELECT pubkey FROM history
+		WHERE email = ?
+	`, &sqlitex.ExecOptions{
+		Args: []any{email},
+		ResultFunc: func(stmt *sqlite.Stmt) error {
+			pubkey := stmt.ColumnText(0)
+			pubkeys = append(pubkeys, pubkey)
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return pubkeys, nil
+}
+
+func (s *Server) storeHistory(email, pubkey string) error {
+	conn, err := s.dbpool.Take(context.Background())
+	if err != nil {
+		return err
+	}
+	defer s.dbpool.Put(conn)
+
+	return sqlitex.Execute(conn, `
+		INSERT INTO history (email, pubkey)
+		VALUES (?, ?)
+	`, &sqlitex.ExecOptions{
+		Args: []any{email, pubkey},
 	})
 }
 

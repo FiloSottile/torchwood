@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -164,8 +166,9 @@ func lookupKey(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey,
 	}
 
 	// Verify spicy signature
-	vrfHashB64 := base64.StdEncoding.EncodeToString(vrfHash)
-	entry := fmt.Appendf(nil, "%s\n%s\n", vrfHashB64, result.Pubkey)
+	h := sha256.New()
+	h.Write([]byte(result.Pubkey))
+	entry := h.Sum(vrfHash) // vrf-r255(email) || SHA-256(pubkey)
 	if err := torchwood.VerifyProof(policy, tlog.RecordHash(entry), []byte(result.Proof)); err != nil {
 		return "", fmt.Errorf("failed to verify key proof: %w", err)
 	}
@@ -174,7 +177,7 @@ func lookupKey(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey,
 }
 
 func monitorLog(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey, email string) ([]string, error) {
-	// Request the VRF proof from the monitor endpoint
+	// Request the VRF proof and history from the monitor endpoint
 	monitorURL := serverURL + "/api/monitor?email=" + url.QueryEscape(email)
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -192,14 +195,22 @@ func monitorLog(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey
 		return nil, fmt.Errorf("keyserver error: %s - %s", resp.Status, string(body))
 	}
 	var result struct {
-		Email    string `json:"email"`
-		VRFProof []byte `json:"vrf_proof"`
+		Email    string   `json:"email"`
+		VRFProof []byte   `json:"vrf_proof"`
+		History  []string `json:"history"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 	if result.Email != email {
 		return nil, fmt.Errorf("keyserver returned unexpected email: %q", result.Email)
+	}
+
+	// Prepare map of hashes of historical keys
+	historyHashes := make(map[[32]byte]string)
+	for _, pk := range result.History {
+		h := sha256.Sum256([]byte(pk))
+		historyHashes[h] = pk
 	}
 
 	// Compute and verify VRF hash
@@ -234,17 +245,17 @@ func monitorLog(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey
 	// Fetch all entries up to the checkpoint size
 	var pubkeys []string
 	for i, entry := range c.AllEntries(context.Background(), checkpoint.Tree, 0) {
-		e, rest, ok := strings.Cut(string(entry), "\n")
+		if len(entry) != 64+32 {
+			return nil, fmt.Errorf("invalid entry size at index %d", i)
+		}
+		if !bytes.Equal(entry[:64], vrfHash) {
+			continue
+		}
+		pk, ok := historyHashes[([32]byte)(entry[64:])]
 		if !ok {
-			return nil, fmt.Errorf("malformed log entry %d: %q", i, string(entry))
+			return nil, fmt.Errorf("found unknown public key hash in log at index %d", i)
 		}
-		k, rest, ok := strings.Cut(rest, "\n")
-		if !ok || rest != "" {
-			return nil, fmt.Errorf("malformed log entry %d: %q", i, string(entry))
-		}
-		if e == base64.StdEncoding.EncodeToString(vrfHash) {
-			pubkeys = append(pubkeys, k)
-		}
+		pubkeys = append(pubkeys, pk)
 	}
 	if c.Err() != nil {
 		return nil, fmt.Errorf("error fetching log entries: %w", c.Err())
