@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -26,6 +27,8 @@ func usage() {
 	fmt.Println("    add-log -db <path> -origin <origin>")
 	fmt.Println("    add-key -db <path> -origin <origin> -key <verifier key>")
 	fmt.Println("    del-key -db <path> -origin <origin> -key <verifier key>")
+	fmt.Println("    add-bastion -db <path> -origin <origin> -bastion <address:port>")
+	fmt.Println("    del-bastion -db <path> -origin <origin> -bastion <address:port>")
 	fmt.Println("    add-sigsum-log -db <path> -key <hex-encoded key>")
 	fmt.Println("    pull-logs -db <path> -source <witness url> [-verbose]")
 	fmt.Println("    list-logs -db <path>")
@@ -62,6 +65,23 @@ func main() {
 		db := openDB(*dbFlag)
 		delKey(db, *originFlag, *keyFlag)
 		log.Printf("Deleted key %q for log %q.", *keyFlag, *originFlag)
+
+	case "add-bastion":
+		originFlag := fs.String("origin", "", "log name")
+		bastionFlag := fs.String("bastion", "", "address:port")
+		fs.Parse(os.Args[2:])
+		checkBastion(*bastionFlag)
+		db := openDB(*dbFlag)
+		addBastion(db, *originFlag, *bastionFlag)
+		log.Printf("Added bastion %q for log %q.", *bastionFlag, *originFlag)
+
+	case "del-bastion":
+		originFlag := fs.String("origin", "", "log name")
+		bastionFlag := fs.String("bastion", "", "address:port")
+		fs.Parse(os.Args[2:])
+		db := openDB(*dbFlag)
+		delBastion(db, *originFlag, *bastionFlag)
+		log.Printf("Deleted bastion %q for log %q.", *bastionFlag, *originFlag)
 
 	case "add-sigsum-log":
 		keyFlag := fs.String("key", "", "hex-encoded key")
@@ -112,6 +132,12 @@ func checkKeyMatches(origin string, vk string) {
 	}
 }
 
+func checkBastion(bastion string) {
+	if _, _, err := net.SplitHostPort(bastion); err != nil {
+		log.Fatalf("Error parsing bastion %q as address:port: %v", bastion, err)
+	}
+}
+
 func addKey(db *sqlite.Conn, origin string, vk string) {
 	err := sqlitexExec(db, "INSERT INTO key (origin, key) VALUES (?, ?)", nil, origin, vk)
 	if err != nil {
@@ -126,6 +152,23 @@ func delKey(db *sqlite.Conn, origin string, vk string) {
 	}
 	if db.Changes() == 0 {
 		log.Fatalf("Key %q not found.", vk)
+	}
+}
+
+func addBastion(db *sqlite.Conn, origin string, bastion string) {
+	err := sqlitexExec(db, "INSERT INTO bastion (origin, bastion) VALUES (?, ?)", nil, origin, bastion)
+	if err != nil {
+		log.Fatalf("Error adding bastion: %v", err)
+	}
+}
+
+func delBastion(db *sqlite.Conn, origin string, bastion string) {
+	err := sqlitexExec(db, "DELETE FROM bastion WHERE origin = ? AND bastion = ?", nil, origin, bastion)
+	if err != nil {
+		log.Fatalf("Error deleting bastion: %v", err)
+	}
+	if db.Changes() == 0 {
+		log.Fatalf("Bastion %q not found.", bastion)
 	}
 }
 
@@ -230,10 +273,12 @@ func listLogs(db *sqlite.Conn) {
 		'origin', log.origin,
 		'size', log.tree_size,
 		'root_hash', log.tree_hash,
-		'keys', json_group_array(key.key))
+		'keys', json_group_array(key.key),
+		'bastions', json_group_array(bastion.bastion))
 	FROM
 		log
 		LEFT JOIN key on log.origin = key.origin
+		LEFT JOIN bastion on log.origin = bastion.origin
 	GROUP BY
 		log.origin
 	ORDER BY
