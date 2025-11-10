@@ -2,12 +2,14 @@ package witness
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +54,11 @@ func OpenDB(dbPath string) (*sqlite.Conn, error) {
 			key TEXT NOT NULL, -- note verifier key
 			FOREIGN KEY(origin) REFERENCES log(origin)
 		);
+		CREATE TABLE IF NOT EXISTS bastion (
+			origin TEXT NOT NULL,
+			bastion TEXT NOT NULL, -- addr:port
+			FOREIGN KEY(origin) REFERENCES log(origin)
+		);
 	`)
 }
 
@@ -90,6 +97,17 @@ func (w *Witness) VerifierKey() string {
 	return w.s.Verifier().String()
 }
 
+func (w *Witness) AllBastions() ([]string, error) {
+	var bastions []string
+	err := w.dbExec("SELECT DISTINCT bastion FROM bastion",
+		func(stmt *sqlite.Stmt) error {
+			bastions = append(bastions, stmt.GetText("bastion"))
+			return nil
+		})
+	return bastions, err
+
+}
+
 type conflictError struct {
 	known int64
 }
@@ -101,6 +119,19 @@ var errInvalidSignature = errors.New("invalid signature")
 var errBadRequest = errors.New("invalid input")
 var errProof = errors.New("bad consistency proof")
 
+type viaBastionKey struct{}
+
+func ContextWithBastion(ctx context.Context, bastion string) context.Context {
+	return context.WithValue(ctx, viaBastionKey{}, bastion)
+}
+
+func ContextBastion(ctx context.Context) string {
+	if bastion, ok := ctx.Value(viaBastionKey{}).(string); ok {
+		return bastion
+	}
+	return ""
+}
+
 func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -108,7 +139,8 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	cosig, err := w.processAddCheckpointRequest(body)
+
+	cosig, err := w.processAddCheckpointRequest(body, ContextBastion(r.Context()))
 	if err, ok := err.(*conflictError); ok {
 		rw.Header().Set("Content-Type", "text/x.tlog.size")
 		rw.WriteHeader(http.StatusConflict)
@@ -135,7 +167,7 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (w *Witness) processAddCheckpointRequest(body []byte) (cosig []byte, err error) {
+func (w *Witness) processAddCheckpointRequest(body []byte, bastion string) (cosig []byte, err error) {
 	l := w.log.With("request", string(body))
 	defer func() {
 		if err != nil {
@@ -169,6 +201,21 @@ func (w *Witness) processAddCheckpointRequest(body []byte) (cosig []byte, err er
 	}
 	origin, _, _ := strings.Cut(string(noteBytes), "\n")
 	l = l.With("origin", origin)
+	bastions, err := w.getBastions(origin)
+	if err != nil {
+		return nil, err
+	}
+	if len(bastions) > 0 {
+		// Accept requests only via these bastion.
+		if bastion == "" || !slices.Contains(bastions, bastion) {
+			return nil, fmt.Errorf("rejected request with origin %q via bastion %q (wrong bastion)", origin, bastion)
+		}
+	} else {
+		// Reject requests from log-specific bastions.
+		if bastion != "" {
+			return nil, fmt.Errorf("rejected request with origin %q via bastion %q (should not use bastion)", origin, bastion)
+		}
+	}
 	verifier, err := w.getKeys(origin)
 	if err != nil {
 		return nil, err
@@ -298,6 +345,16 @@ func (w *Witness) getKeys(origin string) (note.Verifiers, error) {
 		verifiers = append(verifiers, v)
 	}
 	return note.VerifierList(verifiers...), nil
+}
+
+func (w *Witness) getBastions(origin string) ([]string, error) {
+	var bastions []string
+	err := w.dbExec("SELECT bastion FROM bastion WHERE origin = ?",
+		func(stmt *sqlite.Stmt) error {
+			bastions = append(bastions, stmt.GetText("bastion"))
+			return nil
+		}, origin)
+	return bastions, err
 }
 
 func (w *Witness) dbExec(query string, resultFn func(stmt *sqlite.Stmt) error, args ...interface{}) error {
