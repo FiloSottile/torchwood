@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"filippo.io/mostly-harmless/vrf-r255"
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
@@ -20,6 +22,7 @@ import (
 const (
 	defaultKeyserverURL    = "https://keyserver.geomys.org"
 	defaultKeyserverPubkey = "keyserver.geomys.org+16b31509+ARLJ+pmTj78HzTeBj04V+LVfB+GFAQyrg54CRIju7Nn8"
+	defaultKeyserverVRFKey = "mKPsDHDcVB95iPXW4Yc7+HPfi3xOw/bHFvfWw6CAMBs="
 )
 
 func main() {
@@ -40,6 +43,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Environment:\n")
 		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_URL     Default keyserver URL\n")
 		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_PUBKEY  Default keyserver transparency log vkey\n")
+		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_VRFKEY  Default keyserver transparency log VRF public key\n")
 		os.Exit(2)
 	}
 
@@ -62,11 +66,26 @@ func main() {
 	}
 	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(v.Name()), torchwood.SingleVerifierPolicy(v))
 
+	vrfKeyB64 := os.Getenv("AGE_KEYSERVER_VRFKEY")
+	if vrfKeyB64 == "" {
+		vrfKeyB64 = defaultKeyserverVRFKey
+	}
+	vrfKeyBytes, err := base64.StdEncoding.DecodeString(vrfKeyB64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid base64 keyserver VRF public key: %v\n", err)
+		os.Exit(1)
+	}
+	vrfKey, err := vrf.NewPublicKey(vrfKeyBytes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid keyserver VRF public key: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Normalize email
 	email = strings.TrimSpace(strings.ToLower(email))
 
 	if *allFlag {
-		pubkeys, err := monitorLog(server, policy, email)
+		pubkeys, err := monitorLog(server, policy, vrfKey, email)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -77,7 +96,7 @@ func main() {
 		return
 	}
 
-	pubkey, err := lookupKey(server, policy, email)
+	pubkey, err := lookupKey(server, policy, vrfKey, email)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -86,7 +105,7 @@ func main() {
 	fmt.Println(pubkey)
 }
 
-func lookupKey(serverURL string, policy torchwood.Policy, email string) (string, error) {
+func lookupKey(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey, email string) (string, error) {
 	// Build the lookup URL
 	lookupURL := serverURL + "/api/lookup?email=" + url.QueryEscape(email)
 
@@ -130,8 +149,23 @@ func lookupKey(serverURL string, policy torchwood.Policy, email string) (string,
 		return "", fmt.Errorf("empty public key returned")
 	}
 
+	// Compute and verify VRF hash
+	vrfProofBytes, err := torchwood.ProofExtraData([]byte(result.Proof))
+	if err != nil {
+		return "", fmt.Errorf("failed to extract VRF proof: %w", err)
+	}
+	vrfProof, err := vrf.NewProof(vrfProofBytes)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse VRF proof: %w", err)
+	}
+	vrfHash, err := vrfKey.Verify(vrfProof, []byte(email))
+	if err != nil {
+		return "", fmt.Errorf("failed to verify VRF proof: %w", err)
+	}
+
 	// Verify spicy signature
-	entry := fmt.Appendf(nil, "%s\n%s\n", result.Email, result.Pubkey)
+	vrfHashB64 := base64.StdEncoding.EncodeToString(vrfHash)
+	entry := fmt.Appendf(nil, "%s\n%s\n", vrfHashB64, result.Pubkey)
 	if err := torchwood.VerifyProof(policy, tlog.RecordHash(entry), []byte(result.Proof)); err != nil {
 		return "", fmt.Errorf("failed to verify key proof: %w", err)
 	}
@@ -139,7 +173,45 @@ func lookupKey(serverURL string, policy torchwood.Policy, email string) (string,
 	return result.Pubkey, nil
 }
 
-func monitorLog(serverURL string, policy torchwood.Policy, email string) ([]string, error) {
+func monitorLog(serverURL string, policy torchwood.Policy, vrfKey *vrf.PublicKey, email string) ([]string, error) {
+	// Request the VRF proof from the monitor endpoint
+	monitorURL := serverURL + "/api/monitor?email=" + url.QueryEscape(email)
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Get(monitorURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to keyserver: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("no key found for %s", email)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("keyserver error: %s - %s", resp.Status, string(body))
+	}
+	var result struct {
+		Email    string `json:"email"`
+		VRFProof []byte `json:"vrf_proof"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if result.Email != email {
+		return nil, fmt.Errorf("keyserver returned unexpected email: %q", result.Email)
+	}
+
+	// Compute and verify VRF hash
+	vrfProof, err := vrf.NewProof(result.VRFProof)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse VRF proof: %w", err)
+	}
+	vrfHash, err := vrfKey.Verify(vrfProof, []byte(email))
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify VRF proof: %w", err)
+	}
+
 	f, err := torchwood.NewTileFetcher(serverURL+"/tlog", torchwood.WithUserAgent("age-keylookup/1.0"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tile fetcher: %w", err)
@@ -170,7 +242,7 @@ func monitorLog(serverURL string, policy torchwood.Policy, email string) ([]stri
 		if !ok || rest != "" {
 			return nil, fmt.Errorf("malformed log entry %d: %q", i, string(entry))
 		}
-		if e == email {
+		if e == base64.StdEncoding.EncodeToString(vrfHash) {
 			pubkeys = append(pubkeys, k)
 		}
 	}

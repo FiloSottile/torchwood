@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	filippo.io/age v1.2.1
+	filippo.io/mostly-harmless/vrf-r255 v0.0.0-20251110151915-f587ba8b0f82
 	github.com/cheggaaa/pb/v3 v3.1.5
 	github.com/rogpeppe/go-internal v1.14.1
 	github.com/transparency-dev/tessera v1.0.1
@@ -17,6 +18,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/VividCortex/ewma v1.2.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -25,6 +27,7 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gtank/ristretto255 v0.2.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect

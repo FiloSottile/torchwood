@@ -1,6 +1,7 @@
 # start age-keyserver with test hCaptcha secret
 env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
 env LOG_KEY=PRIVATE+KEY+example.com+5800330c+AaAoObvamoDOmN6c30Xh9pH1e/xqKcsU+fNmthQ8qmvM
+env VRF_KEY=vni5C6++aVMFR5tg3bwvLamWlhJEmVrtNT7uNeyo6gQ=
 exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13892 &srv&
 waitfor http://localhost:13892/
 

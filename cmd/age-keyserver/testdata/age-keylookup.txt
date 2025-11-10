@@ -5,7 +5,9 @@ env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
 env AGE_KEYSERVER_URL=http://localhost:13893
 env AGE_KEYSERVER_HMAC_FILE=$WORK/hmac.txt
 env LOG_KEY=PRIVATE+KEY+example.com+5800330c+AaAoObvamoDOmN6c30Xh9pH1e/xqKcsU+fNmthQ8qmvM
+env VRF_KEY=vni5C6++aVMFR5tg3bwvLamWlhJEmVrtNT7uNeyo6gQ=
 env AGE_KEYSERVER_PUBKEY=example.com+5800330c+ARPRGiaIwfx6xka5nXhdD/rqojPMjrjhm7OCuy+03Ymz
+env AGE_KEYSERVER_VRFKEY=cmJCh5QTwp9VqN+QVV+BRxKLKmCFRuVAx+dahotxqw0=
 exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13893 &srv&
 waitfor http://localhost:13893/
 

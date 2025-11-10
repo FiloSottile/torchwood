@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/mostly-harmless/vrf-r255"
 	"filippo.io/torchwood"
 	"filippo.io/torchwood/tesserax"
 	"github.com/transparency-dev/tessera"
@@ -50,6 +51,7 @@ type Server struct {
 	dbpool    *sqlitex.Pool
 	templates *template.Template
 	hmacKey   []byte
+	vrf       *vrf.PrivateKey
 	baseURL   string
 	reader    tessera.LogReader
 	appender  *tessera.Appender
@@ -61,6 +63,7 @@ type KeyData struct {
 	Pubkey    string `json:"pubkey"`
 	UpdatedAt int64  `json:"updated_at"`
 	LogIndex  int64  `json:"log_index"`
+	VRFProof  []byte `json:"vrf_proof"`
 }
 
 const (
@@ -86,6 +89,15 @@ func main() {
 	}
 	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(v.Name()),
 		torchwood.SingleVerifierPolicy(v))
+
+	vrfKey, err := base64.StdEncoding.DecodeString(os.Getenv("VRF_KEY"))
+	if err != nil {
+		log.Fatalln("failed to decode VRF key:", err)
+	}
+	vrf, err := vrf.NewPrivateKey(vrfKey)
+	if err != nil {
+		log.Fatalln("failed to create VRF from key:", err)
+	}
 
 	driver, err := posix.New(ctx, posix.Config{
 		Path: *logPath,
@@ -164,6 +176,7 @@ func main() {
 		dbpool:    dbpool,
 		templates: templates,
 		hmacKey:   hmacKey,
+		vrf:       vrf,
 		baseURL:   baseURL,
 		reader:    logReader,
 		appender:  appender,
@@ -178,6 +191,7 @@ func main() {
 	mux.HandleFunc("GET /manage", srv.handleManage)
 	mux.HandleFunc("POST /setkey", srv.handleSetKey)
 	mux.HandleFunc("GET /api/lookup", srv.handleLookup)
+	mux.HandleFunc("GET /api/monitor", srv.handleMonitor)
 	mux.HandleFunc("POST /api/verify-token", srv.handleVerifyToken)
 
 	// Serve static files
@@ -360,8 +374,12 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Compute VRF hash and proof
+		vrfProof := s.vrf.Prove([]byte(email))
+		vrfHash := base64.StdEncoding.EncodeToString(vrfProof.Hash())
+
 		// Add to transparency log
-		entry := tessera.NewEntry(fmt.Appendf(nil, "%s\n%s\n", email, pubkey))
+		entry := tessera.NewEntry(fmt.Appendf(nil, "%s\n%s\n", vrfHash, pubkey))
 		index, _, err := s.awaiter.Await(r.Context(), s.appender.Add(r.Context(), entry))
 		if err != nil {
 			http.Error(w, "Failed to add to transparency log", http.StatusInternalServerError)
@@ -370,14 +388,14 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Store in database
-		if err := s.storeKey(email, pubkey, int64(index.Index)); err != nil {
+		if err := s.storeKey(email, pubkey, int64(index.Index), vrfProof.Bytes()); err != nil {
 			http.Error(w, "Failed to store key", http.StatusInternalServerError)
 			log.Printf("database error: %v", err)
 			return
 		}
 
 		// Generate proof for success page
-		proofBytes, err := s.makeSpicySignature(r.Context(), int64(index.Index))
+		proofBytes, err := s.makeSpicySignature(r.Context(), int64(index.Index), vrfProof.Bytes())
 		if err != nil {
 			http.Error(w, "Failed to create proof", http.StatusInternalServerError)
 			log.Printf("proof error: %v", err)
@@ -422,7 +440,7 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proof, err := s.makeSpicySignature(r.Context(), data.LogIndex)
+	proof, err := s.makeSpicySignature(r.Context(), data.LogIndex, data.VRFProof)
 	if err != nil {
 		http.Error(w, "Failed to create proof", http.StatusInternalServerError)
 		log.Printf("proof error: %v", err)
@@ -438,7 +456,22 @@ func (s *Server) handleLookup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) makeSpicySignature(ctx context.Context, index int64) ([]byte, error) {
+func (s *Server) handleMonitor(w http.ResponseWriter, r *http.Request) {
+	email := r.URL.Query().Get("email")
+	if email == "" {
+		http.Error(w, "Email parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// Return as JSON
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"email":     email,
+		"vrf_proof": s.vrf.Prove([]byte(email)).Bytes(),
+	})
+}
+
+func (s *Server) makeSpicySignature(ctx context.Context, index int64, vrfProof []byte) ([]byte, error) {
 	checkpoint, err := s.reader.ReadCheckpoint(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read checkpoint: %v", err)
@@ -452,7 +485,7 @@ func (s *Server) makeSpicySignature(ctx context.Context, index int64) ([]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proof: %v", err)
 	}
-	return torchwood.FormatProof(index, p, checkpoint), nil
+	return torchwood.FormatProofWithExtraData(index, vrfProof, p, checkpoint), nil
 }
 
 func (s *Server) generateHMAC(email string, ts int64) string {
@@ -525,11 +558,12 @@ func (s *Server) getKeyData(email string) (*KeyData, error) {
 	return &data, nil
 }
 
-func (s *Server) storeKey(email, pubkey string, index int64) error {
+func (s *Server) storeKey(email, pubkey string, index int64, vrfProof []byte) error {
 	data := KeyData{
 		Pubkey:    pubkey,
 		UpdatedAt: time.Now().Unix(),
 		LogIndex:  index,
+		VRFProof:  vrfProof,
 	}
 
 	jsonData, err := json.Marshal(data)
