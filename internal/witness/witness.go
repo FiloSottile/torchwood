@@ -115,6 +115,7 @@ type conflictError struct {
 func (*conflictError) Error() string { return "known tree size doesn't match provided old size" }
 
 var errUnknownLog = errors.New("unknown log")
+var errWrongBastion = errors.New("rejected request, bad/missing bastion")
 var errInvalidSignature = errors.New("invalid signature")
 var errBadRequest = errors.New("invalid input")
 var errProof = errors.New("bad consistency proof")
@@ -148,7 +149,7 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch err {
-	case errUnknownLog, errInvalidSignature:
+	case errUnknownLog, errInvalidSignature, errWrongBastion:
 		http.Error(rw, err.Error(), http.StatusForbidden)
 		return
 	case errBadRequest:
@@ -206,14 +207,20 @@ func (w *Witness) processAddCheckpointRequest(body []byte, bastion string) (cosi
 		return nil, err
 	}
 	if len(bastions) > 0 {
-		// Accept requests only via these bastion.
-		if bastion == "" || !slices.Contains(bastions, bastion) {
-			return nil, fmt.Errorf("rejected request with origin %q via bastion %q (wrong bastion)", origin, bastion)
+		// Accept requests only via these bastions.
+		if bastion == "" {
+			l.Debug("rejected request not using bastion")
+			return nil, errWrongBastion
+		}
+		if !slices.Contains(bastions, bastion) {
+			l.Debug("rejected request from unexpected bastion", "bastion", bastion)
+			return nil, errWrongBastion
 		}
 	} else {
 		// Reject requests from log-specific bastions.
 		if bastion != "" {
-			return nil, fmt.Errorf("rejected request with origin %q via bastion %q (should not use bastion)", origin, bastion)
+			l.Debug("rejected request that should not use a bastion", "bastion", bastion)
+			return nil, errWrongBastion
 		}
 	}
 	verifier, err := w.getKeys(origin)
