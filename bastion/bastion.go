@@ -90,11 +90,12 @@ func New(c *Config) (*Bastion, error) {
 // ConfigureServer sets up srv to handle backend connections to the bastion. It
 // wraps TLSConfig.GetConfigForClient to intercept backend connections, and sets
 // TLSNextProto for the bastion ALPN protocol. The original tls.Config is still
-// used for non-bastion backend connections.
+// used for non-bastion backend connections *unless* disableRequests is set (in
+// which case srv will not continue TLS handshakes with non-backend clients).
 //
 // Note that since TLSNextProto won't be nil after a call to ConfigureServer,
 // the caller might want to call [http2.ConfigureServer] as well.
-func (b *Bastion) ConfigureServer(srv *http.Server) error {
+func (b *Bastion) ConfigureServer(srv *http.Server, disableRequests bool) error {
 	if srv.TLSNextProto == nil {
 		srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
 	}
@@ -127,6 +128,9 @@ func (b *Bastion) ConfigureServer(srv *http.Server) error {
 				// This is a bastion connection from a backend.
 				return bastionTLSConfig, nil
 			}
+		}
+		if disableRequests {
+			return nil, fmt.Errorf("connection rejected: missing bastion ALPN")
 		}
 		if oldGetConfigForClient != nil {
 			return oldGetConfigForClient(chi)

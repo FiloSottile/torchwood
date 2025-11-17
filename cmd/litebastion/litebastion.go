@@ -34,6 +34,7 @@ import (
 )
 
 var listenAddr = flag.String("listen", "localhost:8443", "host and port to listen at")
+var localRequestsAt = flag.Int("local-requests-at", 0, "only accept non-backend requests at 127.0.0.1:PORT")
 var testCertificates = flag.Bool("testcert", false, "use localhost.pem and localhost-key.pem instead of ACME")
 var autocertCache = flag.String("cache", "", "directory to cache ACME certificates at")
 var autocertHost = flag.String("host", "", "host to obtain ACME certificate for")
@@ -145,6 +146,14 @@ func main() {
 		})
 	}
 
+	requestsOnLocalhost := *localRequestsAt != 0
+	localAddr := fmt.Sprintf("127.0.0.1:%d", *localRequestsAt)
+	hsLocalRequests := &http.Server{
+		Addr:         localAddr,
+		Handler:      http.MaxBytesHandler(mux, 10*1024),
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
 	hs := &http.Server{
 		Addr:         *listenAddr,
 		Handler:      http.MaxBytesHandler(mux, 10*1024),
@@ -155,7 +164,7 @@ func main() {
 			GetCertificate: getCertificate,
 		},
 	}
-	if err := b.ConfigureServer(hs); err != nil {
+	if err := b.ConfigureServer(hs, requestsOnLocalhost); err != nil {
 		logFatal("failed to configure bastion", "err", err)
 	}
 	if err := http2.ConfigureServer(hs, nil); err != nil {
@@ -167,6 +176,12 @@ func main() {
 	defer stop()
 	e := make(chan error, 1)
 	go func() { e <- hs.ListenAndServeTLS("", "") }()
+
+	if requestsOnLocalhost {
+		slog.Info("only listening for non-backend requests locally", "addr", localAddr)
+		go func() { e <- hsLocalRequests.ListenAndServe() }()
+	}
+
 	select {
 	case <-ctx.Done():
 		slog.Info("shutting down on interrupt")

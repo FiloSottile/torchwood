@@ -55,7 +55,7 @@ func Example() {
 	}
 	// ConfigureServer sets up TLSNextProto and a tls.Config.GetConfigForClient
 	// for backend connections.
-	if err := b.ConfigureServer(hs); err != nil {
+	if err := b.ConfigureServer(hs, false); err != nil {
 		log.Fatalln("failed to configure bastion:", err)
 	}
 	// HTTP/2 needs to be explicitly re-enabled if desired because it's only
