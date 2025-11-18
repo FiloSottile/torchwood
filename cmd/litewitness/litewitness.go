@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -44,6 +45,60 @@ var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of t
 var bastionFlag = flag.String("bastion", "", "address of the bastion(s) to reverse proxy through, comma separated, the first online one is selected")
 var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
 
+type ConnectionSet struct {
+	// Map of active connections, and cancel functions for each.
+	connections map[string]func()
+	connect     func(context.Context, string)
+}
+
+func NewConnectionSet(connect func(context.Context, string)) *ConnectionSet {
+	return &ConnectionSet{
+		connections: make(map[string]func()),
+		connect:     connect,
+	}
+}
+
+func (s *ConnectionSet) Configure(ctx context.Context, addrs []string) {
+	slices.Sort(addrs)
+
+	// Disconnect addresses that have disappeared.
+	var toDelete []string
+	for addr, cancel := range s.connections {
+		if _, found := slices.BinarySearch(addrs, addr); !found {
+			cancel()
+			// Postpone delete, we can't delete while iterating over the map.
+			toDelete = append(toDelete, addr)
+		}
+	}
+	for _, addr := range toDelete {
+		delete(s.connections, addr)
+	}
+
+	// Connect new bastions.
+	for _, addr := range addrs {
+		if _, found := s.connections[addr]; found {
+			continue
+		}
+		// Quit early on cancel
+		if ctx.Err() != nil {
+			break
+		}
+		connectionCtx, cancel := context.WithCancel(ctx)
+		s.connections[addr] = cancel
+		go s.connect(connectionCtx, addr)
+	}
+}
+
+func onSignal(signo os.Signal, callback func()) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, signo)
+	go func() {
+		for range c {
+			callback()
+		}
+	}()
+}
+
 func main() {
 	flag.Parse()
 
@@ -53,18 +108,14 @@ func main() {
 	console.SetFilter(slogconsole.IPAddressFilter)
 	slog.SetDefault(slog.New(slogconsole.MultiHandler(h, console)))
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGUSR1)
-	go func() {
-		for range c {
-			slog.Info("received USR1 signal, toggling log level")
-			if level.Level() == slog.LevelDebug {
-				level.Set(slog.LevelInfo)
-			} else {
-				level.Set(slog.LevelDebug)
-			}
+	onSignal(syscall.SIGUSR1, func() {
+		slog.Info("received USR1 signal, toggling log level")
+		if level.Level() == slog.LevelDebug {
+			level.Set(slog.LevelInfo)
+		} else {
+			level.Set(slog.LevelDebug)
 		}
-	}()
+	})
 
 	signer := connectToSSHAgent()
 
@@ -90,28 +141,52 @@ func main() {
 		BaseContext:  func(net.Listener) context.Context { return ctx },
 	}
 	e := make(chan error, 1)
+
+	bastionSet := NewConnectionSet(func(ctx context.Context, addr string) {
+		const bastionInitialRetryDelay = 10 * time.Second
+		const bastionMaxRetryDelay = time.Hour
+
+		delay := bastionInitialRetryDelay
+		for {
+			startTime := time.Now()
+			err := connectToBastion(ctx, addr, signer, srv, true)
+			duration := time.Since(startTime)
+			slog.Warn("bastion connection failed", "duration", duration, "err", err)
+			// Reset retry delay if bastion connection succeeded, and went down
+			// later due to restart or network issues.
+			if err == errBastionDisconnected && duration > delay {
+				delay = bastionInitialRetryDelay
+			} else {
+				delay *= 2
+				if delay > bastionMaxRetryDelay {
+					// Give up, restart to let the scheduler apply any
+					// backoff, and then retry all bastions.
+					e <- err
+					return
+				}
+			}
+			time.Sleep(delay)
+		}
+	})
+
 	// Handle log-specific bastions.
 	logBastions, err := w.AllBastions()
 	if err != nil {
 		fatal("failed looking up bastions", "err", err)
 	}
-	const bastionInitialRetryDelay = 30 * time.Second
-	const bastionMaxRetryDelay = time.Hour
-	for _, bastion := range logBastions {
-		go func(bastion string) {
-			for delay := bastionInitialRetryDelay; ; delay *= 2 {
-				err := connectToBastion(ctx, bastion, signer, srv, true)
-				slog.Warn("connection failed", "bastion", err)
-				if delay > bastionMaxRetryDelay {
-					// Give up, restart to let the scheduler apply any backoff,
-					// and then retry all bastions.
-					e <- err
-					return
-				}
-				time.Sleep(delay)
-			}
-		}(bastion)
-	}
+	bastionSet.Configure(ctx, logBastions)
+
+	// At this point, ownership of bastionSet belongs with the signal goroutine, and must no
+	// longer be accessed by main goroutine.
+	onSignal(syscall.SIGHUP, func() {
+		logBastions, err := w.AllBastions()
+		if err != nil {
+			slog.Warn("failed looking up bastions", "err", err)
+			return
+		}
+		bastionSet.Configure(ctx, logBastions)
+	})
+
 	if *bastionFlag != "" {
 		go func() {
 			for _, bastion := range strings.Split(*bastionFlag, ",") {
