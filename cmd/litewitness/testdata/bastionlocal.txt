@@ -4,8 +4,8 @@
 exec witnessctl add-sigsum-log -key=ffdc2d4d98e4124d3feaf788c0c2f9abfd796083d1f0495437f302ec79cf100f
 
 # start bastion
-exec litebastion -testcert -backends=backends.txt &litebastion&
-waitfor localhost:8443
+exec litebastion -testcert -backends=backends.txt -listen localhost:8444 -listen-http 8080 &litebastion&
+waitfor localhost:8444
 
 # start ssh-agent
 env SSH_AUTH_SOCK=$WORK/s # barely below the max path length
@@ -15,17 +15,19 @@ chmod 600 witness_key.pem
 exec ssh-add witness_key.pem
 
 # fail to start litewitness
-! exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -bastion=0.0.0.0:443,localhost:8443 -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a
+! exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -bastion=0.0.0.0:443,localhost:8444 -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a
 
 # reload backends
 mv correct_backends.txt backends.txt
 exec killall -SIGHUP litebastion
 
 # start litewitness
-exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -bastion=0.0.0.0:443,localhost:8443 -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a &litewitness&
-waitfor https://localhost:8443/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/
+exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -bastion=0.0.0.0:443,localhost:8444 -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a &litewitness&
+waitfor http://localhost:8080/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/
 
-# add-checkpoint
+# add-checkpoint to bastion interface
+! exec hurl --cacert rootCA.pem --test add-checkpoint-public.hurl
+# add-checkpoint to local interface
 exec hurl --cacert rootCA.pem --test add-checkpoint.hurl
 
 # check that litewitness shut down cleanly
@@ -151,8 +153,8 @@ kJHt
 -----END CERTIFICATE-----
 
 
--- add-checkpoint.hurl --
-POST https://localhost:8443/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/add-checkpoint
+-- add-checkpoint-public.hurl --
+POST https://localhost:8444/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/add-checkpoint
 ```
 old 0
 
@@ -162,6 +164,21 @@ KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
 — sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 UgIom7fPZTqpxWWhyjWduBvTvGVqsokMbqTArsQilegKoFBJQjUFAmQ0+YeSPM3wfUQMFSzVnnNuWRTYrajXpNUbIQY=
 ```
-HTTP/2 200
+HTTP 200
+[Asserts]
+body contains "— example.com/witness"
+
+-- add-checkpoint.hurl --
+POST http://localhost:8080/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/add-checkpoint
+```
+old 0
+
+sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562
+1
+KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+— sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 UgIom7fPZTqpxWWhyjWduBvTvGVqsokMbqTArsQilegKoFBJQjUFAmQ0+YeSPM3wfUQMFSzVnnNuWRTYrajXpNUbIQY=
+```
+HTTP 200
 [Asserts]
 body contains "— example.com/witness"

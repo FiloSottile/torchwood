@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,9 +32,11 @@ import (
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/http2"
+	"golang.org/x/sync/errgroup"
 )
 
 var listenAddr = flag.String("listen", "localhost:8443", "host and port to listen at")
+var listenHTTPPort = flag.String("listen-http", "", "localhost port to listen for HTTP requests")
 var testCertificates = flag.Bool("testcert", false, "use localhost.pem and localhost-key.pem instead of ACME")
 var autocertCache = flag.String("cache", "", "directory to cache ACME certificates at")
 var autocertHost = flag.String("host", "", "host to obtain ACME certificate for")
@@ -145,6 +148,50 @@ func main() {
 		})
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	serveGroup, ctx := errgroup.WithContext(ctx)
+
+	if *listenHTTPPort != "" {
+		hs := &http.Server{
+			Addr:         net.JoinHostPort("localhost", *listenHTTPPort),
+			Handler:      http.MaxBytesHandler(mux, 10*1024),
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 5 * time.Second,
+		}
+		l, err := net.Listen("tcp", *listenAddr)
+		if err != nil {
+			logFatal("failed to listen for backends", "err", err)
+		}
+		serveGroup.Go(func() error {
+			slog.Info("listening for HTTP", "addr", hs.Addr)
+			return hs.ListenAndServe()
+		})
+		serveGroup.Go(func() error {
+			slog.Info("listening for backends", "addr", *listenAddr)
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return err
+				}
+				go b.HandleBackendConnection(c)
+			}
+		})
+		serveGroup.Go(func() error {
+			<-ctx.Done()
+			slog.Info("shutting down bastion listener")
+			l.Close()
+			slog.Info("shutting down HTTP server")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			hs.Shutdown(ctx)
+			return nil
+		})
+		serveGroup.Wait()
+		slog.Info("exiting", "err", context.Cause(ctx))
+		return
+	}
+
 	hs := &http.Server{
 		Addr:         *listenAddr,
 		Handler:      http.MaxBytesHandler(mux, 10*1024),
@@ -163,8 +210,6 @@ func main() {
 	}
 
 	slog.Info("listening", "addr", *listenAddr)
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 	e := make(chan error, 1)
 	go func() { e <- hs.ListenAndServeTLS("", "") }()
 	select {

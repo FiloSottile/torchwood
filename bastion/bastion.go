@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +53,7 @@ type Bastion struct {
 	c     *Config
 	proxy *httputil.ReverseProxy
 	pool  *backendConnectionsPool
+	tls   *tls.Config
 }
 
 type keyHash [sha256.Size]byte
@@ -84,7 +87,41 @@ func New(c *Config) (*Bastion, error) {
 		Transport: b.pool,
 		ErrorLog:  slog.NewLogLogger(b.pool.log.Handler(), slog.LevelDebug),
 	}
+	b.tls = &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{"bastion/0"},
+		ClientAuth: tls.RequireAnyClientCert,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if cs.NegotiatedProtocol != "bastion/0" {
+				return fmt.Errorf("missing ALPN")
+			}
+			h, err := backendHash(cs)
+			if err != nil {
+				return err
+			}
+			if !b.c.AllowedBackend(h) {
+				return fmt.Errorf("unrecognized backend %x", h)
+			}
+			return nil
+		},
+		GetCertificate: b.c.GetCertificate,
+	}
 	return b, nil
+}
+
+// HandleBackendConnection handles a new backend connection.
+//
+// It can be used alternatively to [Bastion.ConfigureServer] to accept backend
+// connections on a dedicated listener.
+func (b *Bastion) HandleBackendConnection(conn net.Conn) {
+	tlsConn := tls.Server(conn, b.tls)
+	if err := tlsConn.Handshake(); err != nil {
+		b.pool.log.Debug("failed TLS handshake from backend", "err", err, "remote", conn.RemoteAddr())
+		conn.Close()
+		return
+	}
+	b.pool.Handle(tlsConn)
+	conn.Close()
 }
 
 // ConfigureServer sets up srv to handle backend connections to the bastion. It
@@ -98,23 +135,8 @@ func (b *Bastion) ConfigureServer(srv *http.Server) error {
 	if srv.TLSNextProto == nil {
 		srv.TLSNextProto = make(map[string]func(*http.Server, *tls.Conn, http.Handler))
 	}
-	srv.TLSNextProto["bastion/0"] = b.pool.handleBackend
-
-	bastionTLSConfig := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{"bastion/0"},
-		ClientAuth: tls.RequireAnyClientCert,
-		VerifyConnection: func(cs tls.ConnectionState) error {
-			h, err := backendHash(cs)
-			if err != nil {
-				return err
-			}
-			if !b.c.AllowedBackend(h) {
-				return fmt.Errorf("unrecognized backend %x", h)
-			}
-			return nil
-		},
-		GetCertificate: b.c.GetCertificate,
+	srv.TLSNextProto["bastion/0"] = func(_ *http.Server, c *tls.Conn, _ http.Handler) {
+		b.pool.Handle(c)
 	}
 
 	if srv.TLSConfig == nil {
@@ -122,11 +144,9 @@ func (b *Bastion) ConfigureServer(srv *http.Server) error {
 	}
 	oldGetConfigForClient := srv.TLSConfig.GetConfigForClient
 	srv.TLSConfig.GetConfigForClient = func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
-		for _, proto := range chi.SupportedProtos {
-			if proto == "bastion/0" {
-				// This is a bastion connection from a backend.
-				return bastionTLSConfig, nil
-			}
+		if slices.Contains(chi.SupportedProtos, "bastion/0") {
+			// This is a bastion connection from a backend.
+			return b.tls, nil
 		}
 		if oldGetConfigForClient != nil {
 			return oldGetConfigForClient(chi)
@@ -212,7 +232,7 @@ func (p *backendConnectionsPool) RoundTrip(r *http.Request) (*http.Response, err
 	return cc.RoundTrip(r)
 }
 
-func (p *backendConnectionsPool) handleBackend(hs *http.Server, c *tls.Conn, h http.Handler) {
+func (p *backendConnectionsPool) Handle(c *tls.Conn) {
 	backend, err := backendHash(c.ConnectionState())
 	if err != nil {
 		p.log.Info("failed to get backend hash", "err", err)
