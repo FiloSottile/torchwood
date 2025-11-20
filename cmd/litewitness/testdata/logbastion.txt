@@ -1,8 +1,7 @@
 # gentest seed b4e385f4358f7373cfa9184b176f3cccf808e795baf04092ddfde9461014f0c4
 
-# set up log and its bastion
+# set up log, but no bastion yet
 exec witnessctl add-sigsum-log -key=ffdc2d4d98e4124d3feaf788c0c2f9abfd796083d1f0495437f302ec79cf100f
-exec witnessctl add-bastion -origin=sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 -bastion=localhost:9443
 
 # start bastion
 exec litebastion -listen localhost:9443 -testcert -backends=backends.txt &litebastion&
@@ -16,7 +15,15 @@ chmod 600 witness_key.pem
 exec ssh-add witness_key.pem
 
 # start litewitness
-exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a -no-listen &litewitness&
+exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a -listen localhost:7390 &litewitness&
+
+# add-checkpoint, fails since bastion is unconfigured
+! exec hurl --cacert rootCA.pem --test add-checkpoint.hurl
+
+# Configure bastion
+exec witnessctl add-bastion -origin=sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 -bastion=localhost:9443
+
+exec killall -SIGHUP litewitness
 waitfor https://localhost:9443/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/
 
 # add-checkpoint
@@ -28,7 +35,6 @@ wait litewitness
 stderr 'shutting down'
 
 # check the litebastion output
-killall
 wait litebastion
 stderr 'reloaded backends'
 stderr 'msg="accepted new backend connection" backend=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a'
