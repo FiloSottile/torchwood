@@ -94,6 +94,7 @@ func onSignal(signo os.Signal, callback func()) {
 	signal.Notify(c, signo)
 	go func() {
 		for range c {
+			slog.Info("received SIGHUP, reconfiguring bastions")
 			callback()
 		}
 	}()
