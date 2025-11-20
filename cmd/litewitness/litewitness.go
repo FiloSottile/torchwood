@@ -380,6 +380,12 @@ func connectToBastion(ctx context.Context, bastion string, signer *signer, srv *
 		slog.Info("connecting to bastion failed", "bastion", bastion, "err", err)
 		return fmt.Errorf("connecting to bastion: %v", err)
 	}
+	// Ensure that the connection is closed when our context is cancelled.
+	go func() {
+		<-ctx.Done()
+		conn.Close()
+	}()
+
 	slog.Info("connected to bastion", "bastion", bastion)
 	if logSpecific {
 		ctx = witness.ContextWithBastion(ctx, bastion)
