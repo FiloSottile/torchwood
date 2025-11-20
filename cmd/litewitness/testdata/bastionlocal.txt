@@ -19,7 +19,7 @@ exec ssh-add witness_key.pem
 
 # reload backends
 mv correct_backends.txt backends.txt
-exec killall -SIGHUP litebastion
+killall -SIGHUP litebastion
 
 # start litewitness
 exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -bastion=0.0.0.0:443,localhost:8444 -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a &litewitness&

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"syscall"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -76,8 +78,31 @@ func TestScript(t *testing.T) {
 				ts.Fatalf("timeout waiting for %s: %v", args[0], lastErr)
 			},
 			"killall": func(ts *testscript.TestScript, neg bool, args []string) {
+				if neg {
+					ts.Fatalf("unsupported: !killall")
+				}
+				signo := os.Interrupt
+				if len(args) > 0 {
+					if strings.HasPrefix(args[0], "-") {
+						signalName, _ := strings.CutPrefix(args[0][1:], "SIG")
+
+						if signalName == "HUP" {
+							signo = syscall.SIGHUP
+							args = args[1:]
+						} else {
+							ts.Fatalf("kill: unknown signal name %q", signalName)
+						}
+					}
+				}
 				for _, cmd := range ts.BackgroundCmds() {
-					cmd.Process.Signal(os.Interrupt)
+					if len(args) > 0 {
+						// Only kill processes with this name.
+						name := filepath.Base(cmd.Args[0])
+						if !slices.Contains(args, name) {
+							continue
+						}
+					}
+					cmd.Process.Signal(signo)
 				}
 			},
 			"linecount": func(ts *testscript.TestScript, neg bool, args []string) {
