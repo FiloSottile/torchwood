@@ -143,7 +143,7 @@ func main() {
 	e := make(chan error, 1)
 
 	bastionSet := NewConnectionSet(func(ctx context.Context, addr string) {
-		const bastionInitialRetryDelay = 10 * time.Second
+		const bastionInitialRetryDelay = 5 * time.Second
 		const bastionMaxRetryDelay = time.Hour
 
 		delay := bastionInitialRetryDelay
@@ -157,7 +157,6 @@ func main() {
 			if err == errBastionDisconnected && duration > delay {
 				delay = bastionInitialRetryDelay
 			} else {
-				delay *= 2
 				if delay > bastionMaxRetryDelay {
 					// Give up, restart to let the scheduler apply any
 					// backoff, and then retry all bastions.
@@ -166,6 +165,7 @@ func main() {
 				}
 			}
 			time.Sleep(delay)
+			delay *= 2
 		}
 	})
 
