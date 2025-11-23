@@ -144,29 +144,49 @@ func main() {
 	e := make(chan error, 1)
 
 	bastionSet := NewConnectionSet(func(ctx context.Context, addr string) {
-		const bastionInitialRetryDelay = 5 * time.Second
-		const bastionMaxRetryDelay = time.Hour
+		var delays = []time.Duration{
+			100 * time.Millisecond,
+			1 * time.Second, 1 * time.Second, 1 * time.Second,
+			5 * time.Second, 15 * time.Second, 30 * time.Second,
+			1 * time.Minute,
+		}
 
-		delay := bastionInitialRetryDelay
+		// If a connection survives for resetRetryDelay, reset the retry delay.
+		const resetRetryDelay = 5 * time.Minute
+
+		retry := 0
 		for {
 			startTime := time.Now()
 			err := connectToBastion(ctx, addr, signer, srv, true)
 			duration := time.Since(startTime)
-			slog.Warn("bastion connection failed", "duration", duration, "err", err)
-			// Reset retry delay if bastion connection succeeded, and went down
-			// later due to restart or network issues.
-			if err == errBastionDisconnected && duration > delay {
-				delay = bastionInitialRetryDelay
-			} else {
-				if delay > bastionMaxRetryDelay {
-					// Give up, restart to let the scheduler apply any
-					// backoff, and then retry all bastions.
-					e <- err
-					return
-				}
+			slog.Warn("bastion connection failed", "bastion", addr, "duration", duration, "err", err)
+
+			// Quit early on cancel.
+			if ctx.Err() != nil {
+				return
 			}
-			time.Sleep(delay)
-			delay *= 2
+
+			// If the connection lasted long enough, reset the retry delay.
+			if duration >= resetRetryDelay {
+				retry = 0
+			}
+
+			// Wait before retrying.
+			var delay time.Duration
+			if retry < len(delays) {
+				delay = delays[retry]
+			} else {
+				delay = delays[len(delays)-1]
+			}
+			slog.Info("waiting before reconnecting to bastion", "bastion", addr, "delay", delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			retry++
 		}
 	})
 
