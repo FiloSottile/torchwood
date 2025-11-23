@@ -273,8 +273,14 @@ func listLogs(db *sqlite.Conn) {
 		'origin', log.origin,
 		'size', log.tree_size,
 		'root_hash', log.tree_hash,
-		'keys', json_group_array(key.key),
-		'bastions', json_group_array(bastion.bastion))
+		'keys', COALESCE(
+			json_group_array(key.key) FILTER (WHERE key.key IS NOT NULL),
+			json_array()
+		),
+		'bastions', COALESCE(
+			json_group_array(bastion.bastion) FILTER (WHERE bastion.bastion IS NOT NULL),
+			json_array()
+		))
 	FROM
 		log
 		LEFT JOIN key on log.origin = key.origin
