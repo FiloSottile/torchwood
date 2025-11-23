@@ -400,7 +400,10 @@ func connectToBastion(ctx context.Context, bastion string, signer *signer, srv *
 		return fmt.Errorf("connecting to bastion: %v", err)
 	}
 	// Ensure that the connection is closed when our context is cancelled.
+	ctx, cancel = context.WithCancel(ctx)
+	defer cancel()
 	go func() {
+		// TODO: gracefully complete in-flight requests.
 		<-ctx.Done()
 		conn.Close()
 	}()
