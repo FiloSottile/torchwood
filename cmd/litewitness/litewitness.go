@@ -226,7 +226,7 @@ func main() {
 			e <- srv.ListenAndServe()
 		}()
 	} else if len(logBastions) == 0 {
-		fatal("configured to not open a listening port, but no bastions configured")
+		slog.Warn("configured to not open a listening port, but no bastions configured")
 	}
 
 	select {
