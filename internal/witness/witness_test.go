@@ -40,7 +40,7 @@ sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e
 KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
 — sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 UgIom7fPZTqpxWWhyjWduBvTvGVqsokMbqTArsQilegKoFBJQjUFAmQ0+YeSPM3wfUQMFSzVnnNuWRTYrajXpNUbIQY=
-`))
+`), "")
 	fatalIfErr(t, err)
 
 	// Stall the first request updating to the shorter size between getting
@@ -63,7 +63,7 @@ sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e
 RcCI1Nk56ZcSmIEfIn0SleqtV7uvrlXNccFx595Iwl0=
 
 — sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 UgIom2VbtIcdFbwFAy1n7s6IkAxIY6J/GQOTuZF2ORV39d75cbAj2aQYwyJre36kezNobZs4SUUdrcawfAB8WVrx6go=
-`))
+`), "")
 		if _, ok := err.(*conflictError); !ok {
 			t.Errorf("expected conflict, got %v", err)
 		}
@@ -87,7 +87,7 @@ sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e
 QrtXrQZCCvpIgsSmOsah7HdICzMLLyDfxToMql9WTjY=
 
 — sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562 UgIomw/EOJmWi0i1FQsOj+etB7F8IccFam/jgd6wzRns4QPVmyEZtdvl1U2KEmLOZ/ASRcWJi0tW90dJWAShei7sDww=
-`))
+`), "")
 	if err != nil {
 		t.Errorf("racing request failed: %v", err)
 	}
