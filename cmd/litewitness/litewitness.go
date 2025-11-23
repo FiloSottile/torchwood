@@ -402,11 +402,11 @@ func connectToBastion(ctx context.Context, bastion string, signer *signer, srv *
 	// Ensure that the connection is closed when our context is cancelled.
 	ctx, cancel = context.WithCancel(ctx)
 	defer cancel()
-	go func() {
+	go func(ctx context.Context) {
 		// TODO: gracefully complete in-flight requests.
 		<-ctx.Done()
 		conn.Close()
-	}()
+	}(ctx)
 
 	slog.Info("connected to bastion", "bastion", bastion)
 	if logSpecific {
