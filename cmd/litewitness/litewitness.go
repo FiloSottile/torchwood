@@ -46,8 +46,7 @@ var bastionFlag = flag.String("bastion", "", "address of the bastion(s) to rever
 var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
 
 type ConnectionSet struct {
-	// Map of active connections, and cancel functions for each.
-	connections map[string]func()
+	connections map[string]func() // connection => cancel func
 	connect     func(context.Context, string)
 }
 
@@ -79,7 +78,7 @@ func (s *ConnectionSet) Configure(ctx context.Context, addrs []string) {
 		if _, found := s.connections[addr]; found {
 			continue
 		}
-		// Quit early on cancel
+		// Quit early on cancel.
 		if ctx.Err() != nil {
 			break
 		}
@@ -94,7 +93,6 @@ func onSignal(signo os.Signal, callback func()) {
 	signal.Notify(c, signo)
 	go func() {
 		for range c {
-			slog.Info("received SIGHUP, reconfiguring bastions")
 			callback()
 		}
 	}()
@@ -197,9 +195,10 @@ func main() {
 	}
 	bastionSet.Configure(ctx, logBastions)
 
-	// At this point, ownership of bastionSet belongs with the signal goroutine, and must no
-	// longer be accessed by main goroutine.
+	// At this point, ownership of bastionSet belongs with the signal goroutine,
+	// and must no longer be accessed by main goroutine.
 	onSignal(syscall.SIGHUP, func() {
+		slog.Info("received SIGHUP, reconfiguring bastions")
 		logBastions, err := w.AllBastions()
 		if err != nil {
 			slog.Warn("failed looking up bastions", "err", err)
