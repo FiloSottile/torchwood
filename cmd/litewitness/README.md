@@ -56,13 +56,17 @@ SSH_AUTH_SOCK=litewitness.sock ssh-add litewitness.pem
             address of the bastion(s) to reverse proxy through, comma separated, the first online one is selected
     -listen string
             address to listen for HTTP requests (default "localhost:7380")
+    -no-listen
+            do not open any listening socket, rely exclusively on bastions
 
-Only one of `-bastion` or `-listen` must be specified. The former will cause
-litewitness to serve requests through a bastion reverse proxy (see below). The
-latter will listen for HTTP requests on the specified port. (HTTPS needs to be
-terminated outside of litewitness.) The bastion flag is an optionally
-comma-separated list of bastions to try in order until one connects
-successfully. If the connection drops after establishing, litewitness exits.
+Only one of `-bastion` or `-listen` must be specified, or `-no-listen` can be
+used to rely exclusively on per-log bastions configured in the database. The
+`-bastion` flag will cause litewitness to serve requests through a bastion
+reverse proxy (see below). The `-listen` flag will listen for HTTP requests on
+the specified port. (HTTPS needs to be terminated outside of litewitness.) The
+bastion flag is an optionally comma-separated list of bastions to try in order
+until one connects successfully. If the connection drops after establishing,
+litewitness exits.
 
 ## witnessctl
 
@@ -80,6 +84,14 @@ re-added. To disable a log, remove all its keys.
 
 The `add-key` and `del-key` commands add and remove verifier keys for a known
 log. The name of the key must match the log origin.
+
+    witnessctl add-bastion -db <path> -origin <origin> -bastion <address:port>
+    witnessctl del-bastion -db <path> -origin <origin> -bastion <address:port>
+
+The `add-bastion` and `del-bastion` commands add and remove bastion addresses
+for a log. Multiple bastions can be configured for a log and will be used
+simultaneously. Bastion configuration is reloaded when litewitness receives a
+SIGHUP signal.
 
     witnessctl add-sigsum-log -db <path> -key <hex-encoded key>
 
