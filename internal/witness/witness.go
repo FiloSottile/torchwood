@@ -206,22 +206,9 @@ func (w *Witness) processAddCheckpointRequest(body []byte, bastion string) (cosi
 	if err != nil {
 		return nil, err
 	}
-	if len(bastions) > 0 {
-		// Accept requests only via these bastions.
-		if bastion == "" {
-			l.Debug("rejected request not using bastion")
-			return nil, errWrongBastion
-		}
-		if !slices.Contains(bastions, bastion) {
-			l.Debug("rejected request from unexpected bastion", "bastion", bastion)
-			return nil, errWrongBastion
-		}
-	} else {
-		// Reject requests from log-specific bastions.
-		if bastion != "" {
-			l.Debug("rejected request that should not use a bastion", "bastion", bastion)
-			return nil, errWrongBastion
-		}
+	if bastion != "" && !slices.Contains(bastions, bastion) {
+		l.Debug("rejected request from unexpected bastion", "bastion", bastion)
+		return nil, errWrongBastion
 	}
 	verifier, err := w.getKeys(origin)
 	if err != nil {
