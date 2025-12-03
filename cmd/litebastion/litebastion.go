@@ -92,6 +92,9 @@ func main() {
 		}
 		bs := strings.TrimSpace(string(backendsList))
 		for _, line := range strings.Split(bs, "\n") {
+			if line == "" {
+				continue
+			}
 			l, err := hex.DecodeString(line)
 			if err != nil {
 				return fmt.Errorf("invalid backend: %q", line)
