@@ -166,12 +166,9 @@ func TestVerifyProof_Valid(t *testing.T) {
 	// Format the proof
 	formattedProof := torchwood.FormatProof(0, proof, signedCheckpoint)
 
-	// Verify the proof
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier))
-	}
-
-	err = torchwood.VerifyProof(origin, openFunc, recordHash, formattedProof)
+	// Verify the proof - use ThresholdPolicy with OriginPolicy and SingleVerifierPolicy
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier))
+	err = torchwood.VerifyProof(policy, recordHash, formattedProof)
 	if err != nil {
 		t.Errorf("VerifyProof failed for valid proof: %v", err)
 	}
@@ -215,11 +212,8 @@ func TestVerifyProof_ValidWithExtra(t *testing.T) {
 
 	formattedProof := torchwood.FormatProofWithExtraData(0, extra, proof, signedCheckpoint)
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier))
-	}
-
-	err = torchwood.VerifyProof(origin, openFunc, recordHash, formattedProof)
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier))
+	err = torchwood.VerifyProof(policy, recordHash, formattedProof)
 	if err != nil {
 		t.Errorf("VerifyProof failed for valid proof with extra: %v", err)
 	}
@@ -228,11 +222,7 @@ func TestVerifyProof_ValidWithExtra(t *testing.T) {
 func TestVerifyProof_MissingHeader(t *testing.T) {
 	proof := []byte("index 0\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for missing header")
 	}
@@ -244,11 +234,7 @@ func TestVerifyProof_MissingHeader(t *testing.T) {
 func TestVerifyProof_InvalidHeader(t *testing.T) {
 	proof := []byte("wrong-header\nindex 0\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for invalid header")
 	}
@@ -260,11 +246,7 @@ func TestVerifyProof_InvalidHeader(t *testing.T) {
 func TestVerifyProof_MissingIndex(t *testing.T) {
 	proof := []byte("c2sp.org/tlog-proof@v1\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for missing index")
 	}
@@ -276,11 +258,7 @@ func TestVerifyProof_MissingIndex(t *testing.T) {
 func TestVerifyProof_InvalidIndex(t *testing.T) {
 	proof := []byte("c2sp.org/tlog-proof@v1\nindex notanumber\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for invalid index")
 	}
@@ -292,11 +270,7 @@ func TestVerifyProof_InvalidIndex(t *testing.T) {
 func TestVerifyProof_NegativeIndex(t *testing.T) {
 	proof := []byte("c2sp.org/tlog-proof@v1\nindex -1\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for negative index")
 	}
@@ -308,11 +282,7 @@ func TestVerifyProof_NegativeIndex(t *testing.T) {
 func TestVerifyProof_InvalidExtra(t *testing.T) {
 	proof := []byte("c2sp.org/tlog-proof@v1\nextra not-valid-base64!!!\nindex 0\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for invalid extra encoding")
 	}
@@ -324,11 +294,7 @@ func TestVerifyProof_InvalidExtra(t *testing.T) {
 func TestVerifyProof_InvalidHash(t *testing.T) {
 	proof := []byte("c2sp.org/tlog-proof@v1\nindex 0\nnot-valid-base64!!!\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for invalid hash encoding")
 	}
@@ -342,11 +308,7 @@ func TestVerifyProof_InvalidHashLength(t *testing.T) {
 	shortHash := base64.StdEncoding.EncodeToString(make([]byte, 16))
 	proof := []byte(fmt.Sprintf("c2sp.org/tlog-proof@v1\nindex 0\n%s\n\nexample.com/test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n", shortHash))
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return nil, errors.New("should not be called")
-	}
-
-	err := torchwood.VerifyProof("example.com/test", openFunc, tlog.Hash{}, proof)
+	err := torchwood.VerifyProof(torchwood.ThresholdPolicy(0), tlog.Hash{}, proof)
 	if err == nil {
 		t.Error("VerifyProof should fail for invalid hash length")
 	}
@@ -394,16 +356,15 @@ func TestVerifyProof_OriginMismatch(t *testing.T) {
 
 	formattedProof := torchwood.FormatProof(0, proof, signedCheckpoint)
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier))
-	}
-
-	err = torchwood.VerifyProof(origin, openFunc, tlog.RecordHash(data), formattedProof)
+	// Policy expects origin but checkpoint has wrongOrigin
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier))
+	err = torchwood.VerifyProof(policy, tlog.RecordHash(data), formattedProof)
 	if err == nil {
 		t.Error("VerifyProof should fail for origin mismatch")
 	}
-	if !strings.Contains(err.Error(), "origin mismatch") {
-		t.Errorf("expected 'origin mismatch' error, got: %v", err)
+	// The threshold policy reports the number of satisfied components
+	if !strings.Contains(err.Error(), "policy components satisfied") {
+		t.Errorf("expected 'policy components satisfied' error, got: %v", err)
 	}
 }
 
@@ -447,21 +408,15 @@ func TestVerifyProof_SignatureVerificationFails(t *testing.T) {
 	formattedProof := torchwood.FormatProof(0, proof, signedCheckpoint)
 
 	// Try to verify with the wrong verifier
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier2))
-	}
-
-	err = torchwood.VerifyProof(origin, openFunc, tlog.RecordHash(data), formattedProof)
+	wrongPolicy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier2))
+	err = torchwood.VerifyProof(wrongPolicy, tlog.RecordHash(data), formattedProof)
 	if err == nil {
 		t.Error("VerifyProof should fail when signature verification fails")
 	}
 
 	// Verify it works with the correct verifier
-	openFunc = func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier1))
-	}
-
-	err = torchwood.VerifyProof(origin, openFunc, tlog.RecordHash(data), formattedProof)
+	correctPolicy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier1))
+	err = torchwood.VerifyProof(correctPolicy, tlog.RecordHash(data), formattedProof)
 	if err != nil {
 		t.Errorf("VerifyProof should succeed with correct verifier: %v", err)
 	}
@@ -505,12 +460,9 @@ func TestVerifyProof_RecordVerificationFails(t *testing.T) {
 
 	formattedProof := torchwood.FormatProof(0, proof, signedCheckpoint)
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier))
-	}
-
 	// Try to verify with wrong data
-	err = torchwood.VerifyProof(origin, openFunc, tlog.RecordHash(wrongData), formattedProof)
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier))
+	err = torchwood.VerifyProof(policy, tlog.RecordHash(wrongData), formattedProof)
 	if err == nil {
 		t.Error("VerifyProof should fail when record hash doesn't match")
 	}
@@ -567,11 +519,8 @@ func TestVerifyRecordError_WithExtra(t *testing.T) {
 
 	formattedProof := torchwood.FormatProofWithExtraData(0, extra, proof, signedCheckpoint)
 
-	openFunc := func(msg []byte) (*note.Note, error) {
-		return note.Open(msg, note.VerifierList(verifier))
-	}
-
-	err = torchwood.VerifyProof(origin, openFunc, tlog.RecordHash(wrongData), formattedProof)
+	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(origin), torchwood.SingleVerifierPolicy(verifier))
+	err = torchwood.VerifyProof(policy, tlog.RecordHash(wrongData), formattedProof)
 	if err == nil {
 		t.Error("VerifyProof should fail when record hash doesn't match")
 	}
@@ -591,5 +540,136 @@ func TestVerifyRecordError_WithExtra(t *testing.T) {
 		if verifyErr.Error() != expectedMsg {
 			t.Errorf("expected error message %q, got %q", expectedMsg, verifyErr.Error())
 		}
+	}
+}
+
+func TestVerifyCheckpoint_UnrestrictedOrigin(t *testing.T) {
+	origin := "example.com/test"
+	hash := tlog.RecordHash([]byte("test data"))
+
+	_, verifier, signedCheckpoint := setupTestLog(t, origin, 10, hash)
+
+	// SingleVerifierPolicy alone doesn't check the origin
+	policy := torchwood.SingleVerifierPolicy(verifier)
+
+	_, _, err := torchwood.VerifyCheckpoint(signedCheckpoint, policy)
+	if err == nil {
+		t.Error("VerifyCheckpoint should fail when policy doesn't check origin")
+	}
+	if !strings.Contains(err.Error(), "not checking the checkpoint origin") {
+		t.Errorf("expected 'not checking the checkpoint origin' error, got: %v", err)
+	}
+}
+
+func TestOriginPolicy_Check(t *testing.T) {
+	// Test basic OriginPolicy
+	policy := torchwood.OriginPolicy("example.com/test")
+
+	// Check with matching origin should pass
+	err := policy.Check("example.com/test", nil)
+	if err != nil {
+		t.Errorf("OriginPolicy.Check should pass for matching origin: %v", err)
+	}
+
+	// Check with non-matching origin should fail
+	err = policy.Check("wrong.com/test", nil)
+	if err == nil {
+		t.Error("OriginPolicy.Check should fail for non-matching origin")
+	}
+	if !strings.Contains(err.Error(), "origin mismatch") {
+		t.Errorf("expected 'origin mismatch' error, got: %v", err)
+	}
+}
+
+func TestOriginPolicy_ThresholdWithMultipleOrigins(t *testing.T) {
+	// Test Threshold(1, OriginPolicy("foo"), OriginPolicy("bar")) should work with foo or bar
+	policy := torchwood.ThresholdPolicy(1,
+		torchwood.OriginPolicy("foo.com/log"),
+		torchwood.OriginPolicy("bar.com/log"),
+	)
+
+	// Should pass with first origin
+	err := policy.Check("foo.com/log", nil)
+	if err != nil {
+		t.Errorf("ThresholdPolicy should pass with first origin: %v", err)
+	}
+
+	// Should pass with second origin
+	err = policy.Check("bar.com/log", nil)
+	if err != nil {
+		t.Errorf("ThresholdPolicy should pass with second origin: %v", err)
+	}
+
+	// Should fail with neither origin
+	err = policy.Check("other.com/log", nil)
+	if err == nil {
+		t.Error("ThresholdPolicy should fail with neither origin")
+	}
+}
+
+func TestOriginPolicy_ThresholdOnlyCountsContributingOrigins(t *testing.T) {
+	// A Threshold(1, OriginPolicy("foo"), OriginPolicy("bar")) should work with
+	// either foo or bar, not requiring both to match.
+	// This tests that only the OriginPolicy that actually matches contributes
+	// to the threshold.
+	origin := "foo.com/test"
+	hash := tlog.RecordHash([]byte("test data"))
+
+	_, verifier, signedCheckpoint := setupTestLog(t, origin, 10, hash)
+
+	// Policy: threshold 2 of [OriginPolicy(foo), OriginPolicy(bar), SingleVerifierPolicy]
+	// With origin "foo.com/test", only OriginPolicy(foo) and SingleVerifierPolicy should pass
+	// So threshold of 2 should be satisfied
+	policy := torchwood.ThresholdPolicy(2,
+		torchwood.ThresholdPolicy(1,
+			torchwood.OriginPolicy("foo.com/test"),
+			torchwood.OriginPolicy("bar.com/test"),
+		),
+		torchwood.SingleVerifierPolicy(verifier),
+	)
+
+	c, _, err := torchwood.VerifyCheckpoint(signedCheckpoint, policy)
+	if err != nil {
+		t.Errorf("VerifyCheckpoint should succeed: %v", err)
+	}
+	if c.Origin != origin {
+		t.Errorf("expected origin %q, got %q", origin, c.Origin)
+	}
+
+	// Now test with bar.com/test origin
+	origin2 := "bar.com/test"
+	_, verifier2, signedCheckpoint2 := setupTestLog(t, origin2, 10, hash)
+
+	policy2 := torchwood.ThresholdPolicy(2,
+		torchwood.ThresholdPolicy(1,
+			torchwood.OriginPolicy("foo.com/test"),
+			torchwood.OriginPolicy("bar.com/test"),
+		),
+		torchwood.SingleVerifierPolicy(verifier2),
+	)
+
+	c2, _, err := torchwood.VerifyCheckpoint(signedCheckpoint2, policy2)
+	if err != nil {
+		t.Errorf("VerifyCheckpoint should succeed with second origin: %v", err)
+	}
+	if c2.Origin != origin2 {
+		t.Errorf("expected origin %q, got %q", origin2, c2.Origin)
+	}
+
+	// Test that wrong origin fails
+	origin3 := "wrong.com/test"
+	_, verifier3, signedCheckpoint3 := setupTestLog(t, origin3, 10, hash)
+
+	policy3 := torchwood.ThresholdPolicy(2,
+		torchwood.ThresholdPolicy(1,
+			torchwood.OriginPolicy("foo.com/test"),
+			torchwood.OriginPolicy("bar.com/test"),
+		),
+		torchwood.SingleVerifierPolicy(verifier3),
+	)
+
+	_, _, err = torchwood.VerifyCheckpoint(signedCheckpoint3, policy3)
+	if err == nil {
+		t.Error("VerifyCheckpoint should fail with wrong origin")
 	}
 }

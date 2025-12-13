@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -34,6 +35,7 @@ type Checkpoint struct {
 	Extension string
 }
 
+// ParseCheckpoint parses a c2sp.org/tlog-checkpoint payload without signatures.
 func ParseCheckpoint(text string) (Checkpoint, error) {
 	// This is an extended version of tlog.ParseTree.
 
@@ -77,4 +79,40 @@ func (c Checkpoint) String() string {
 		base64.StdEncoding.EncodeToString(c.Hash[:]),
 		c.Extension,
 	)
+}
+
+type unverifiedNoteError struct {
+	err error
+	n   *note.Note
+}
+
+func (e *unverifiedNoteError) Error() string {
+	return fmt.Sprintf("note verification failed: %v", e.err)
+}
+
+func (e *unverifiedNoteError) Unwrap() []error {
+	return []error{e.err, &note.UnverifiedNoteError{Note: e.n}}
+}
+
+// VerifyCheckpoint parses and verifies a signed c2sp.org/tlog-checkpoint.
+//
+// If the note signatures do not satisfy the provided policy, an error wrapping
+// *[note.UnverifiedNoteError] is returned.
+func VerifyCheckpoint(signedCheckpoint []byte, policy Policy) (Checkpoint, *note.Note, error) {
+	n, err := note.Open(signedCheckpoint, policy)
+	if err != nil {
+		return Checkpoint{}, nil, err
+	}
+	c, err := ParseCheckpoint(n.Text)
+	if err != nil {
+		return Checkpoint{}, nil, fmt.Errorf("parsing checkpoint: %v", err)
+	}
+	if err := policy.Check(c.Origin, n.Sigs); err != nil {
+		return Checkpoint{}, nil, &unverifiedNoteError{err: err, n: n}
+	}
+	// Check that at least one component of the policy checked the origin.
+	if err := policy.Check("check.invalid", n.Sigs); err == nil {
+		return Checkpoint{}, nil, errors.New("policy is not checking the checkpoint origin")
+	}
+	return c, n, nil
 }

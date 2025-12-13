@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
@@ -60,11 +59,11 @@ func (e *VerifyRecordError) Error() string {
 // c2sp.org/tlog-proof@v1) for a record hash rh (generally produced with
 // [tlog.RecordHash]).
 //
-// The origin must match the log's origin, and the open function will be used to
-// verify the signed checkpoint included in the proof. If open returns an error,
-// it is returned directly. If the proof is valid but does not verify the record
-// hash rh at the given index, a *[VerifyRecordError] is returned.
-func VerifyProof(origin string, open func([]byte) (*note.Note, error), rh tlog.Hash, proof []byte) error {
+// If the note signatures do not satisfy the provided policy, an error wrapping
+// *[note.UnverifiedNoteError] is returned. If the proof is valid but does not
+// verify the record hash rh at the given index, a *[VerifyRecordError] is
+// returned.
+func VerifyProof(policy Policy, rh tlog.Hash, proof []byte) error {
 	hdr, rest, ok := strings.Cut(string(proof), "\n")
 	if !ok || hdr != "c2sp.org/tlog-proof@v1" {
 		return errors.New("malformed tlog proof: missing header, this may not be a tlog proof")
@@ -116,20 +115,9 @@ func VerifyProof(origin string, open func([]byte) (*note.Note, error), rh tlog.H
 		}
 		p = append(p, tlog.Hash(h))
 	}
-	// Peek at the origin, if it's wrong, opening will likely fail.
-	if s, _, _ := strings.Cut(rest, "\n"); s != origin {
-		return fmt.Errorf("proof origin mismatch: got %q, want %q", s, origin)
-	}
-	n, err := open([]byte(rest))
+	c, _, err := VerifyCheckpoint([]byte(rest), policy)
 	if err != nil {
 		return err
-	}
-	c, err := ParseCheckpoint(n.Text)
-	if err != nil {
-		return fmt.Errorf("invalid checkpoint in proof: %w", err)
-	}
-	if c.Origin != origin {
-		return fmt.Errorf("checkpoint origin mismatch: got %q, want %q", c.Origin, origin)
 	}
 	if err := tlog.CheckRecord(p, c.N, c.Hash, idx, rh); err != nil {
 		return &VerifyRecordError{
