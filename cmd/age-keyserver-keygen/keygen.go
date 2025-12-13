@@ -27,6 +27,6 @@ func main() {
 
 	fmt.Printf("Private key (for LOG_KEY in age-keyserver): %s\n", skey)
 	fmt.Printf("Private VRF key (for VRF_KEY in age-keyserver): %s\n", base64.StdEncoding.EncodeToString(vrfKey.Bytes()))
-	fmt.Printf("Public key (for AGE_KEYSERVER_PUBKEY in age-keylookup): %s\n", vkey)
+	fmt.Printf("Public key (for AGE_KEYSERVER_POLICY in age-keylookup): %s\n", vkey)
 	fmt.Printf("Public VRF key (for AGE_KEYSERVER_VRFKEY in age-keylookup): %s\n", base64.StdEncoding.EncodeToString(vrfKey.PublicKey().Bytes()))
 }

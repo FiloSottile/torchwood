@@ -41,6 +41,8 @@ import (
 var (
 	//go:embed templates static
 	embeddedFS embed.FS
+	//go:embed witness_policy.txt
+	defaultWitnessPolicy []byte
 
 	dbPath     = flag.String("db", "keyserver.sqlite3", "path to SQLite database")
 	logPath    = flag.String("logdir", "keyserver-tlog", "directory for transparency log")
@@ -112,6 +114,17 @@ func main() {
 		log.Fatalln("failed to create log storage driver:", err)
 	}
 
+	witnessPolicy := defaultWitnessPolicy
+	if path := os.Getenv("LOG_WITNESS_POLICY"); path != "" {
+		witnessPolicy, err = os.ReadFile(path)
+		if err != nil {
+			log.Fatalln("failed to read witness policy file:", err)
+		}
+	}
+	witnesses, err := tessera.NewWitnessGroupFromPolicy(witnessPolicy)
+	if err != nil {
+		log.Fatalln("failed to create witness group from policy:", err)
+	}
 	// Since this is a low-traffic but interactive server, disable batching to
 	// remove integration latency for the first request. Keep a 1s checkpoint
 	// interval not to hit the witnesses too often; this will be observed only
@@ -127,7 +140,8 @@ func main() {
 		WithCheckpointSigner(s).
 		WithBatching(1, tessera.DefaultBatchMaxAge).
 		WithCheckpointInterval(checkpointInterval).
-		WithCheckpointRepublishInterval(24*time.Hour))
+		WithCheckpointRepublishInterval(24*time.Hour).
+		WithWitnesses(witnesses, nil))
 	if err != nil {
 		log.Fatalln("failed to create log appender:", err)
 	}

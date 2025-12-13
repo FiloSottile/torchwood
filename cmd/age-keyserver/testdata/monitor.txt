@@ -1,13 +1,25 @@
 # Test monitoring mode
 
+# Start witness
+exec witnessctl add-log -origin example.com
+exec witnessctl add-key -origin example.com -key example.com+5800330c+ARPRGiaIwfx6xka5nXhdD/rqojPMjrjhm7OCuy+03Ymz
+env SSH_AUTH_SOCK=$WORK/sock
+! exec ssh-agent -a $SSH_AUTH_SOCK -D & # ssh-agent always exits 2
+waitfor $SSH_AUTH_SOCK
+chmod 600 witness_key.pem
+exec ssh-add witness_key.pem
+exec litewitness -ssh-agent=$SSH_AUTH_SOCK -listen localhost:7392 -name=example.com/witness -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a &
+waitfor localhost:7392
+
 # Start age-keyserver
 env HCAPTCHA_SECRET=0x0000000000000000000000000000000000000000
 env AGE_KEYSERVER_URL=http://localhost:13894
 env AGE_KEYSERVER_HMAC_FILE=$WORK/hmac.txt
 env LOG_KEY=PRIVATE+KEY+example.com+5800330c+AaAoObvamoDOmN6c30Xh9pH1e/xqKcsU+fNmthQ8qmvM
+env LOG_WITNESS_POLICY=policy.txt
 env VRF_KEY=vni5C6++aVMFR5tg3bwvLamWlhJEmVrtNT7uNeyo6gQ=
-env AGE_KEYSERVER_PUBKEY=example.com+5800330c+ARPRGiaIwfx6xka5nXhdD/rqojPMjrjhm7OCuy+03Ymz
 env AGE_KEYSERVER_VRFKEY=cmJCh5QTwp9VqN+QVV+BRxKLKmCFRuVAx+dahotxqw0=
+env AGE_KEYSERVER_POLICY=policy.txt
 exec age-keyserver -db=$WORK/test.sqlite3 -listen=localhost:13894 &srv&
 waitfor http://localhost:13894/
 
@@ -29,3 +41,19 @@ stdout 'age1h24cj29vfe5t0wq9sp88fawatczsalq33qnh53wzpa03y8eeka7suwjcfs'
 killall
 wait srv
 stderr 'shutting down'
+
+
+-- witness_key.pem --
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACBkhIrYq+1uhZgbOzh1slK4dn67SwL3A6yjsecbvWqOUAAA
+AIgN5+09DeftPQAAAAtzc2gtZWQyNTUxOQAAACBkhIrYq+1uhZgbOzh1slK4dn67
+SwL3A6yjsecbvWqOUAAAAEAx/8IRbsvgA6yqgAq3B1e9fVMgbj/r72ptB5bZVTCz
+T2SEitir7W6FmBs7OHWyUrh2frtLAvcDrKOx5xu9ao5QAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+
+
+-- policy.txt --
+log example.com+5800330c+ARPRGiaIwfx6xka5nXhdD/rqojPMjrjhm7OCuy+03Ymz
+witness W example.com/witness+10a1c019+BGSEitir7W6FmBs7OHWyUrh2frtLAvcDrKOx5xu9ao5Q http://localhost:7392
+quorum W

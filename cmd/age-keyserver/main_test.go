@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -27,6 +28,10 @@ func TestMain(m *testing.M) {
 }
 
 func TestScript(t *testing.T) {
+	// On macOS, the default TMPDIR is too long for ssh-agent socket paths.
+	if runtime.GOOS == "darwin" {
+		t.Setenv("TMPDIR", "/tmp")
+	}
 	p := testscript.Params{
 		Dir: "testdata",
 		Setup: func(e *testscript.Env) error {
@@ -37,6 +42,8 @@ func TestScript(t *testing.T) {
 				cmd.Args = append(cmd.Args, "-cover")
 			}
 			cmd.Args = append(cmd.Args, "filippo.io/torchwood/cmd/age-keylookup")
+			cmd.Args = append(cmd.Args, "filippo.io/torchwood/cmd/litewitness")
+			cmd.Args = append(cmd.Args, "filippo.io/torchwood/cmd/witnessctl")
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			return cmd.Run()

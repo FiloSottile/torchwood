@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,6 +27,10 @@ func TestMain(m *testing.M) {
 }
 
 func TestScript(t *testing.T) {
+	// On macOS, the default TMPDIR is too long for ssh-agent socket paths.
+	if runtime.GOOS == "darwin" {
+		t.Setenv("TMPDIR", "/tmp")
+	}
 	p := testscript.Params{
 		Dir: "testdata",
 		Setup: func(e *testscript.Env) error {

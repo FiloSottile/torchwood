@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -17,15 +18,16 @@ import (
 
 	"filippo.io/mostly-harmless/vrf-r255"
 	"filippo.io/torchwood"
-	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
 )
 
 const (
 	defaultKeyserverURL    = "https://keyserver.geomys.org"
-	defaultKeyserverPubkey = "keyserver.geomys.org+16b31509+ARLJ+pmTj78HzTeBj04V+LVfB+GFAQyrg54CRIju7Nn8"
 	defaultKeyserverVRFKey = "mKPsDHDcVB95iPXW4Yc7+HPfi3xOw/bHFvfWw6CAMBs="
 )
+
+//go:embed default_policy.txt
+var defaultPolicy []byte
 
 func main() {
 	allFlag := flag.Bool("all", false, "list all public keys in the transparency log")
@@ -44,8 +46,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n")
 		fmt.Fprintf(os.Stderr, "Environment:\n")
 		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_URL     Default keyserver URL\n")
-		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_PUBKEY  Default keyserver transparency log vkey\n")
 		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_VRFKEY  Default keyserver transparency log VRF public key\n")
+		fmt.Fprintf(os.Stderr, "  AGE_KEYSERVER_POLICY  Default keyserver transparency log policy\n")
 		os.Exit(2)
 	}
 
@@ -57,16 +59,20 @@ func main() {
 		server = defaultKeyserverURL
 	}
 
-	vkey := os.Getenv("AGE_KEYSERVER_PUBKEY")
-	if vkey == "" {
-		vkey = defaultKeyserverPubkey
+	policyBytes := defaultPolicy
+	if policyPath := os.Getenv("AGE_KEYSERVER_POLICY"); policyPath != "" {
+		p, err := os.ReadFile(policyPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to read policy file: %v\n", err)
+			os.Exit(1)
+		}
+		policyBytes = p
 	}
-	v, err := note.NewVerifier(vkey)
+	policy, err := torchwood.ParsePolicy(policyBytes)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid keyserver public key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error: invalid policy: %v\n", err)
 		os.Exit(1)
 	}
-	policy := torchwood.ThresholdPolicy(2, torchwood.OriginPolicy(v.Name()), torchwood.SingleVerifierPolicy(v))
 
 	vrfKeyB64 := os.Getenv("AGE_KEYSERVER_VRFKEY")
 	if vrfKeyB64 == "" {
