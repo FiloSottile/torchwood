@@ -270,25 +270,19 @@ func logKeys(db *sqlite.Conn, origin string) (keys map[string]bool, exists bool)
 func listLogs(db *sqlite.Conn) {
 	if err := sqlitexExec(db, `
 	SELECT json_object(
-		'origin', log.origin,
-		'size', log.tree_size,
-		'root_hash', log.tree_hash,
+		'origin', l.origin,
+		'size', l.tree_size,
+		'root_hash', l.tree_hash,
 		'keys', COALESCE(
-			json_group_array(key.key) FILTER (WHERE key.key IS NOT NULL),
+			(SELECT json_group_array(k.key) FROM key k WHERE k.origin = l.origin),
 			json_array()
 		),
 		'bastions', COALESCE(
-			json_group_array(bastion.bastion) FILTER (WHERE bastion.bastion IS NOT NULL),
+			(SELECT json_group_array(b.bastion) FROM bastion b WHERE b.origin = l.origin),
 			json_array()
 		))
-	FROM
-		log
-		LEFT JOIN key on log.origin = key.origin
-		LEFT JOIN bastion on log.origin = bastion.origin
-	GROUP BY
-		log.origin
-	ORDER BY
-		log.origin
+	FROM log l
+	ORDER BY l.origin
 	`, func(stmt *sqlite.Stmt) error {
 		_, err := fmt.Printf("%s\n", stmt.ColumnText(0))
 		return err

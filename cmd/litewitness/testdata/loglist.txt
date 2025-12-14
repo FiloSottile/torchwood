@@ -18,8 +18,9 @@ exec witnessctl list-logs
 cmp stdout list-logs.jsonl
 ! stderr .
 
-# add a bastion
-exec witnessctl add-bastion -origin sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120 -bastion bastion.example.org:666
+# add bastions
+exec witnessctl add-bastion -origin sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120 -bastion bastion-1.example.org:666
+exec witnessctl add-bastion -origin sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120 -bastion bastion-2.example.org:666
 exec witnessctl list-logs
 cmp stdout list-logs.2.jsonl
 ! stderr .
@@ -80,4 +81,4 @@ origin sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4
 -- list-logs.2.jsonl --
 {"origin":"example.com/foo","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/2ef59132082631d13e353b5ae49b22bc51a9bd59f41a2d570960a9658c1ed151+e2137795+ATp+37IPHc3SbPGzFMyZmPTOUlClk6PYPH+Ce5JiCb/h"],"bastions":[]}
 {"origin":"sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4cd2e9b8702","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/f48d4a1d0c6370ec189dc537f648ef3bb347b012fbd3c899a630a4cd2e9b8702+9bc54c7f+AVv6q3xDaHxI2aTemqEb7W6ZcbO7QbTqTr20thOqfqsw"],"bastions":[]}
-{"origin":"sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120+7f693d84+AUlxeri80AO7/4j/+OGo+5M2Sud0ktFg34uZl2fZnjJT"],"bastions":["bastion.example.org:666"]}
+{"origin":"sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120","size":0,"root_hash":"47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=","keys":["sigsum.org/v1/tree/fae7fd8f084f9e7a1482162da8a3e52b08e6c1bac74ab831d00eb5c983b84120+7f693d84+AUlxeri80AO7/4j/+OGo+5M2Sud0ktFg34uZl2fZnjJT"],"bastions":["bastion-1.example.org:666","bastion-2.example.org:666"]}
