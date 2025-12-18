@@ -26,6 +26,8 @@ acceptable client/witness key hashes.
             path to TLS certificate
     -tls-key string
             path to TLS private key
+    -log-level string
+            minimum severity level to log (default "info")
 
 Since litebastion needs to operate at a lower level than HTTPS on the witness
 side, it can't be behind a reverse proxy, and needs to configure its own TLS
