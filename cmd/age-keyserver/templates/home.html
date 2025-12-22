@@ -115,6 +115,13 @@
 				resultDiv.innerHTML = '<p style="margin-top: 1rem;" class="error">Error looking up key.</p>';
 			}
 		});
+
+		let params = new URLSearchParams(document.location.search);
+		let emailParam = params.get("email")
+		if (emailParam !== null) {
+			document.getElementById('lookup-email').value = emailParam;
+			document.getElementById('lookup-form').requestSubmit();
+		}
 	</script>
 </body>
 </html>
