@@ -116,12 +116,14 @@
 			}
 		});
 
-		let params = new URLSearchParams(document.location.search);
-		let emailParam = params.get("email")
-		if (emailParam !== null) {
-			document.getElementById('lookup-email').value = emailParam;
-			document.getElementById('lookup-form').requestSubmit();
-		}
+		document.addEventListener("DOMContentLoaded", () => {
+			const params = new URLSearchParams(document.location.search);
+			const emailParam = params.get("email");
+			if (emailParam !== null) {
+				document.getElementById('lookup-email').value = emailParam;
+				document.getElementById('lookup-form').requestSubmit();
+			}
+		});
 	</script>
 </body>
 </html>
