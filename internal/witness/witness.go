@@ -200,7 +200,10 @@ func (w *Witness) processAddCheckpointRequest(body []byte, bastion string) (cosi
 			return nil, errBadRequest
 		}
 	}
-	origin, _, _ := strings.Cut(string(noteBytes), "\n")
+	origin, _, ok := strings.Cut(string(noteBytes), "\n")
+	if !ok || origin == "" {
+		return nil, errBadRequest
+	}
 	l = l.With("origin", origin)
 	bastions, err := w.getBastions(origin)
 	if err != nil {
