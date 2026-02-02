@@ -370,7 +370,8 @@ func connectToBastion(ctx context.Context, bastion string, signer *signer, srv *
 	slog.Info("connecting to bastion", "bastion", bastion)
 	cert, err := selfSignedCertificate(signer)
 	if err != nil {
-		fatal("generating self-signed certificate", "err", err)
+		slog.Error("generating self-signed certificate", "err", err)
+		return fmt.Errorf("generating self-signed certificate: %v", err)
 	}
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
