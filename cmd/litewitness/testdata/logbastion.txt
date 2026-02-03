@@ -28,15 +28,15 @@ exec litebastion -listen localhost:9444 -tls-cert localhost.pem -tls-key localho
 waitfor localhost:9444
 
 # add a second log and configure it to use the second bastion
-exec witnessctl add-sigsum-log -key=7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34
-exec witnessctl add-bastion -origin=example.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34 -bastion=localhost:9444
+exec witnessctl add-sigsum-log -key=018ba3481b45d6d420508e8a081e8e348850bf35549a8452670e2ab488a23ba0
+exec witnessctl add-bastion -origin=sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34 -bastion=localhost:9444
 
 # reload litewitness to pick up new log and bastion
 killall -SIGHUP litewitness
 waitfor https://localhost:9444/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/
 
 # test that accessing a log configured for bastion 9444 through bastion 9443 fails with 403
-! exec hurl --cacert rootCA.pem --test add-checkpoint-second-log.hurl
+exec hurl --cacert rootCA.pem --test add-checkpoint-second-log.hurl
 
 # check that litewitness shut down cleanly
 killall
@@ -182,11 +182,11 @@ sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062
 1
 KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
-— sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34
+— sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34 FT0wb5DnnGeTROo5HF59wmElJqCDyeG7SSE7RekcamqB8ZnuRX88zeGCeQornqgvMB7SNhuwTYn/KsnnK/LDc1pLxw8=
 ```
 HTTP 403
 [Asserts]
-body contains "wrong bastion"
+body contains "bad/missing bastion"
 
 POST https://localhost:9444/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/add-checkpoint
 ```
@@ -196,6 +196,6 @@ sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062
 1
 KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
-— sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34
+— sigsum.org/v1/tree/7c589ec3432005b91812adef062f4783ce95c6ff502048ce67063c1b84062e34 FT0wb5DnnGeTROo5HF59wmElJqCDyeG7SSE7RekcamqB8ZnuRX88zeGCeQornqgvMB7SNhuwTYn/KsnnK/LDc1pLxw8=
 ```
 HTTP 200
