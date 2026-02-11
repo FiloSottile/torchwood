@@ -46,15 +46,20 @@ var autocertEmail = flag.String("email", "", "")
 var allowedBackendsFile = flag.String("backends", "", "file of accepted key hashes, one per line, reloaded on SIGHUP")
 var homeRedirect = flag.String("home-redirect", "", "redirect / to this URL")
 var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
+var logLevel = flag.String("log-level", "info", "log level (debug, info, warn, error)")
 
 type keyHash [sha256.Size]byte
 
 func main() {
 	flag.Parse()
 
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(*logLevel)); err != nil {
+		logFatal("unknown log level, must be one of 'debug', 'info', 'warn', or 'error'")
+	}
 	console := slogconsole.New(nil)
 	console.SetFilter(slogconsole.IPAddressFilter)
-	h := slog.NewTextHandler(os.Stderr, nil)
+	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	slog.SetDefault(slog.New(slogconsole.MultiHandler(h, console)))
 
 	http2.VerboseLogs = true // will go to DEBUG due to SetLogLoggerLevel
