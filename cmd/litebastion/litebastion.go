@@ -105,7 +105,7 @@ func main() {
 		}
 		bs := strings.TrimSpace(string(backendsList))
 		for _, line := range strings.Split(bs, "\n") {
-			if line == "" {
+			if line == "" || line[0] == '#' {
 				continue
 			}
 			l, err := hex.DecodeString(line)
