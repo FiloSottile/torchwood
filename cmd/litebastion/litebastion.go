@@ -45,7 +45,7 @@ var autocertHost = flag.String("host", "", "host to obtain ACME certificate for"
 var autocertEmail = flag.String("email", "", "")
 var allowedBackendsFile = flag.String("backends", "", "file of accepted key hashes, one per line, reloaded on SIGHUP")
 var homeRedirect = flag.String("home-redirect", "", "redirect / to this URL")
-var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
+var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable /logz endpoint)")
 
 type keyHash [sha256.Size]byte
 

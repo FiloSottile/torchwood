@@ -39,7 +39,7 @@ the provided certificate and private key are used instead. The certificate and
 key are reloaded on SIGHUP.
 
     -obscurity
-            enable obscurity mode (disable / and /logz endpoints)
+            enable obscurity mode (disable /logz endpoint)
 
     -listen-http [HOST:]PORT
             only accept HTTP requests at http://HOST:PORT or http://localhost:PORT
