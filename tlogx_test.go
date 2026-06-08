@@ -23,12 +23,25 @@ func TestRightEdge(t *testing.T) {
 		{16, []int64{
 			tlog.StoredHashIndex(4, 0),
 		}},
+		{1 << 62, []int64{ // 2^62, the maximum supported tree size
+			tlog.StoredHashIndex(62, 0),
+		}},
 	}
 	for _, test := range tests {
 		if got := torchwood.RightEdge(test.n); !reflect.DeepEqual(got, test.want) {
 			t.Errorf("RightEdge(%d) = %v; want %v", test.n, got, test.want)
 		}
 	}
+
+	// A tree size beyond 2^62 must panic rather than loop forever in maxpow2.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Errorf("RightEdge(1<<62 + 1) did not panic")
+			}
+		}()
+		torchwood.RightEdge(1<<62 + 1)
+	}()
 }
 
 func TestHashProof(t *testing.T) {
@@ -66,6 +79,15 @@ func TestHashProof(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	// Oversized tree size must be rejected, not hang. (ProveHash/CheckHash
+	// delegate the bound to ProveSubtree/CheckSubtree.)
+	if _, err := torchwood.ProveHash(1<<62+1, 0, hashReader); err == nil {
+		t.Errorf("ProveHash with t > 2^62: nil error")
+	}
+	if err := torchwood.CheckHash(nil, 1<<62+1, tlog.Hash{}, 0, tlog.Hash{}); err == nil {
+		t.Errorf("CheckHash with t > 2^62: nil error")
 	}
 }
 
