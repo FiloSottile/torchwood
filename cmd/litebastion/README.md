@@ -14,6 +14,8 @@ requests over that connection. The bastion then proxies requests received at
 The only configuration file of litebastion is the backends file, which lists the
 acceptable client/witness key hashes.
 
+Empty lines and lines starting with `#` are ignored.
+
     -listen string
             host and port to listen at (default "localhost:8443")
     -cache string
