@@ -1,15 +1,35 @@
 ## Unreleased
 
+- Dependencies were upgraded.
+
+### torchwood
+
+- Added `SubtreeHash`, `ValidSubtree`, `CoverInterval`, and subtree proofs.
+
+- Added ML-DSA-44 cosignature support.
+
+### mpt
+
+- New package with a Merkle Patricia Trie implementation.
+
 ### litewitness
 
 - The `-bastion` flag was removed. Configure per-log bastions instead, for
   example with the new `set-bastions` witnessctl command.
+
+- Added Prometheus metrics and `-listen-metrics` flag.
+
+- The bastion certificate is now generated once at startup.
 
 ### witnessctl
 
 - Added `set-bastions` command, which adds the given bastion(s) to every log
   that has none configured (for example after `pull-logs`), or replaces the
   bastions of every log with `-all`.
+
+### litebastion
+
+- Comments and empty lines are now allowed in the backends file.
 
 ## v0.9.0
 
