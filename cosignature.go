@@ -35,20 +35,14 @@ const (
 //
 // Note that ML-DSA-44 cosigners reject checkpoints with extension lines.
 func NewCosignatureSigner(name string, key crypto.Signer) (*CosignatureSigner, error) {
-	if !isValidName(name) {
-		return nil, errors.New("invalid name")
+	pubKey := key.Public()
+	v, err := NewCosignatureVerifierFromKey(name, pubKey)
+	if err != nil {
+		return nil, err
 	}
-
-	s := &CosignatureSigner{}
-	s.v.name = name
-
-	ed25519Key, isEd25519 := key.Public().(ed25519.PublicKey)
-	mldsaKey, isMLDSA := key.Public().(*mldsa.PublicKey)
-
-	switch {
-	case isEd25519:
-		s.v.hash = keyHash(name, append([]byte{algCosignatureEd25519}, ed25519Key...))
-		s.v.key = ed25519Key
+	s := &CosignatureSigner{v: *v}
+	switch pubKey.(type) {
+	case ed25519.PublicKey:
 		s.sign = func(msg []byte) ([]byte, error) {
 			t := uint64(time.Now().Unix())
 			m, err := formatCosignatureV1(t, msg)
@@ -66,21 +60,7 @@ func NewCosignatureSigner(name string, key crypto.Signer) (*CosignatureSigner, e
 			sig = append(sig, s...)
 			return sig, nil
 		}
-		s.v.verify = func(msg, sig []byte) bool {
-			if len(sig) != 8+ed25519.SignatureSize {
-				return false
-			}
-			t := binary.BigEndian.Uint64(sig)
-			sig = sig[8:]
-			m, err := formatCosignatureV1(t, msg)
-			if err != nil {
-				return false
-			}
-			return ed25519.Verify(ed25519Key, m, sig)
-		}
-	case isMLDSA:
-		s.v.hash = keyHash(name, append([]byte{algCosignatureMLDSA}, mldsaKey.Bytes()...))
-		s.v.key = mldsaKey
+	case *mldsa.PublicKey:
 		s.sign = func(msg []byte) ([]byte, error) {
 			t := uint64(time.Now().Unix())
 			m, err := formatSubtreeV1(name, t, msg)
@@ -98,22 +78,9 @@ func NewCosignatureSigner(name string, key crypto.Signer) (*CosignatureSigner, e
 			sig = append(sig, s...)
 			return sig, nil
 		}
-		s.v.verify = func(msg, sig []byte) bool {
-			if len(sig) != 8+mldsa.MLDSA44SignatureSize {
-				return false
-			}
-			t := binary.BigEndian.Uint64(sig)
-			sig = sig[8:]
-			m, err := formatSubtreeV1(name, t, msg)
-			if err != nil {
-				return false
-			}
-			return mldsa.Verify(mldsaKey, m, sig, nil) == nil
-		}
 	default:
 		return nil, errors.New("key type is not supported")
 	}
-
 	return s, nil
 }
 
@@ -209,23 +176,61 @@ func NewCosignatureVerifier(vkey string) (*CosignatureVerifier, error) {
 	hash16, key64, _ := strings.Cut(vkey, "+")
 	hash, err1 := strconv.ParseUint(hash16, 16, 32)
 	key, err2 := base64.StdEncoding.DecodeString(key64)
-	if len(hash16) != 8 || err1 != nil || err2 != nil || !isValidName(name) || len(key) == 0 {
+	if len(hash16) != 8 || err1 != nil || err2 != nil || len(key) == 0 {
 		return nil, errors.New("malformed verifier id")
 	}
-	if uint32(hash) != keyHash(name, key) {
-		return nil, errors.New("invalid verifier hash")
-	}
 	alg, key := key[0], key[1:]
+	var verifier *CosignatureVerifier
 	switch alg {
 	case algCosignatureEd25519:
 		if len(key) != ed25519.PublicKeySize {
 			return nil, errors.New("malformed verifier public key")
 		}
 		k := ed25519.PublicKey(key)
+		v, err := NewCosignatureVerifierFromKey(name, k)
+		if err != nil {
+			return nil, err
+		}
+		verifier = v
+	case algCosignatureMLDSA:
+		k, err := mldsa.NewPublicKey(mldsa.MLDSA44(), key)
+		if err != nil {
+			return nil, fmt.Errorf("malformed verifier public key: %w", err)
+		}
+		v, err := NewCosignatureVerifierFromKey(name, k)
+		if err != nil {
+			return nil, err
+		}
+		verifier = v
+	default:
+		return nil, errors.New("unknown verifier algorithm")
+	}
+	if uint32(hash) != verifier.KeyHash() {
+		return nil, errors.New("invalid verifier hash")
+	}
+	return verifier, nil
+}
+
+// NewCosignatureVerifierFromKey constructs a new [CosignatureVerifier] from a
+// public key. It supports [ed25519.PublicKey] and [*mldsa.PublicKey].
+//
+// Note that ML-DSA-44 verifiers reject cosignatures on checkpoints with
+// extension lines.
+func NewCosignatureVerifierFromKey(name string, key crypto.PublicKey) (*CosignatureVerifier, error) {
+	if !isValidName(name) {
+		return nil, errors.New("invalid name")
+	}
+
+	switch k := key.(type) {
+	case ed25519.PublicKey:
+		if len(k) != ed25519.PublicKeySize {
+			return nil, errors.New("malformed Ed25519 public key")
+		}
+		hash := keyHash(name, append([]byte{algCosignatureEd25519}, k...))
 		return &CosignatureVerifier{
 			verifier: verifier{
 				name: name,
-				hash: uint32(hash),
+				hash: hash,
 				verify: func(msg, sig []byte) bool {
 					if len(sig) != 8+ed25519.SignatureSize {
 						return false
@@ -242,17 +247,17 @@ func NewCosignatureVerifier(vkey string) (*CosignatureVerifier, error) {
 					return ed25519.Verify(k, m, sig)
 				},
 			},
-			key: ed25519.PublicKey(key),
+			key: k,
 		}, nil
-	case algCosignatureMLDSA:
-		k, err := mldsa.NewPublicKey(mldsa.MLDSA44(), key)
-		if err != nil {
-			return nil, fmt.Errorf("malformed verifier public key: %w", err)
+	case *mldsa.PublicKey:
+		if k.Parameters() != mldsa.MLDSA44() {
+			return nil, errors.New("ML-DSA parameters are not ML-DSA-44")
 		}
+		hash := keyHash(name, append([]byte{algCosignatureMLDSA}, k.Bytes()...))
 		return &CosignatureVerifier{
 			verifier: verifier{
 				name: name,
-				hash: uint32(hash),
+				hash: hash,
 				verify: func(msg, sig []byte) bool {
 					if len(sig) != 8+mldsa.MLDSA44SignatureSize {
 						return false
@@ -272,7 +277,7 @@ func NewCosignatureVerifier(vkey string) (*CosignatureVerifier, error) {
 			key: k,
 		}, nil
 	default:
-		return nil, errors.New("unknown verifier algorithm")
+		return nil, errors.New("key type is not supported")
 	}
 }
 

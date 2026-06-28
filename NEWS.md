@@ -8,6 +8,9 @@
 
 - Added ML-DSA-44 cosignature support.
 
+- Added `NewCosignatureVerifierFromKey` to produce a verifier from a
+  `crypto.PublicKey` instead of a vkey.
+
 ### mpt
 
 - New package with a Merkle Patricia Trie implementation.
