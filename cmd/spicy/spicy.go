@@ -169,18 +169,19 @@ func main() {
 		log.Fatalf("could not parse latest checkpoint: %v", err)
 	}
 
-	hashes := make(map[int64]tlog.Hash)
-	hashReader := tlog.HashReaderFunc(func(indexes []int64) ([]tlog.Hash, error) {
+	edgeHashes := make(map[int64]tlog.Hash)
+	edgeReader := tlog.HashReaderFunc(func(indexes []int64) ([]tlog.Hash, error) {
 		list := make([]tlog.Hash, 0, len(indexes))
 		for _, id := range indexes {
-			h, ok := hashes[id]
+			h, ok := edgeHashes[id]
 			if !ok {
-				return nil, fmt.Errorf("index %d not in hashes", id)
+				return nil, fmt.Errorf("index %d not in edge", id)
 			}
 			list = append(list, h)
 		}
 		return list, nil
 	})
+	hashReader := torchwood.NewHashReaderOverlay(c.N, edgeReader)
 
 	edge, err := os.ReadFile(filepath.Join(*assetsFlag, "edge"))
 	if err != nil {
@@ -210,7 +211,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("malformed edge file: %v", err)
 		}
-		hashes[idx[i]] = hash
+		edgeHashes[idx[i]] = hash
 	}
 
 	fmt.Fprintf(os.Stderr, "Log loaded.\n")
@@ -218,7 +219,7 @@ func main() {
 	fmt.Fprintf(os.Stderr, "  - Current size: %d\n", c.N)
 	fmt.Fprintf(os.Stderr, "  - Assets directory: %s\n", *assetsFlag)
 
-	for i, path := range flag.Args() {
+	for _, path := range flag.Args() {
 		if _, err := os.Stat(path + ".spicy"); err == nil {
 			log.Fatalf("spicy signature already exists for %q", path)
 		}
@@ -226,13 +227,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("could not read %q: %v", path, err)
 		}
-		n := c.N + int64(i)
-		hh, err := tlog.StoredHashes(n, f, hashReader)
-		if err != nil {
+		n := hashReader.Size()
+		if err := hashReader.AppendRecordHash(tlog.RecordHash(f)); err != nil {
 			log.Fatalf("could not append %q: %v", path, err)
-		}
-		for k, h := range hh {
-			hashes[tlog.StoredHashIndex(0, n)+int64(k)] = h
 		}
 		entryPath := filepath.Join(*assetsFlag, strconv.FormatInt(n, 10))
 		if err := os.WriteFile(entryPath, f, 0644); err != nil {
@@ -241,7 +238,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  + %q is now entry %d\n", path, n)
 	}
 
-	N := c.N + int64(len(flag.Args()))
+	N := hashReader.Size()
 	th, err := tlog.TreeHash(N, hashReader)
 	if err != nil {
 		log.Fatalf("could not compute tree hash: %v", err)
@@ -255,8 +252,12 @@ func main() {
 		log.Fatalf("could not sign new checkpoint: %v", err)
 	}
 	newEdge := fmt.Sprintf("size %d\n", N)
-	for _, idx := range torchwood.RightEdge(N) {
-		newEdge += fmt.Sprintf("%s\n", hashes[idx])
+	newEdgeHashes, err := hashReader.ReadHashes(torchwood.RightEdge(N))
+	if err != nil {
+		log.Fatalf("could not read new edge hashes: %v", err)
+	}
+	for _, h := range newEdgeHashes {
+		newEdge += fmt.Sprintf("%s\n", h)
 	}
 
 	if err := os.WriteFile(filepath.Join(*assetsFlag, "latest"), newCheckpoint, 0644); err != nil {

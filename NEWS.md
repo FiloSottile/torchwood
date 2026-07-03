@@ -11,6 +11,9 @@
 - Added `NewCosignatureVerifierFromKey` to produce a verifier from a
   `crypto.PublicKey` instead of a vkey.
 
+- Added `HashReaderOverlay`, a `tlog.HashReader` that extends a tree with the
+  stored hashes of appended records, held in memory.
+
 ### mpt
 
 - New package with a Merkle Patricia Trie implementation.
