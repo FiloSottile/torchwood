@@ -8,6 +8,9 @@
 
 - Added ML-DSA-44 cosignature support.
 
+- Added `CosignatureSigner.SignSubtree` and `CosignatureVerifier.VerifySubtree`
+  to sign and verify subtree cosignatures.
+
 - Added `NewCosignatureVerifierFromKey` to produce a verifier from a
   `crypto.PublicKey` instead of a vkey.
 

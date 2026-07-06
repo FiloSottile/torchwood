@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
+	"golang.org/x/mod/sumdb/tlog"
 )
 
 const (
@@ -40,7 +41,7 @@ func NewCosignatureSigner(name string, key crypto.Signer) (*CosignatureSigner, e
 	if err != nil {
 		return nil, err
 	}
-	s := &CosignatureSigner{v: *v}
+	s := &CosignatureSigner{v: *v, key: key}
 	switch pubKey.(type) {
 	case ed25519.PublicKey:
 		s.sign = func(msg []byte) ([]byte, error) {
@@ -104,18 +105,6 @@ func formatCosignatureV1(t uint64, msg []byte) ([]byte, error) {
 }
 
 func formatSubtreeV1(name string, t uint64, msg []byte) ([]byte, error) {
-	// The signed message is in the following format
-	//
-	// struct {
-	//     uint8 label[12] = "subtree/v1\n\0";
-	//     opaque cosigner_name<1..2^8-1>;
-	//     uint64 timestamp;
-	//     opaque log_origin<1..2^8-1>;
-	//     uint64 start;
-	//     uint64 end;
-	//     uint8 hash[32];
-	// } cosigned_message;
-
 	c, err := ParseCheckpoint(string(msg))
 	if err != nil {
 		return nil, fmt.Errorf("message being signed is not a valid checkpoint: %w", err)
@@ -128,18 +117,46 @@ func formatSubtreeV1(name string, t uint64, msg []byte) ([]byte, error) {
 	if string(msg) != c.String() {
 		return nil, errors.New("message being signed does not match parsed checkpoint")
 	}
+	return subtreeCosignedMessage(name, t, c.Origin, 0, c.N, c.Hash)
+}
+
+func subtreeCosignedMessage(name string, t uint64, origin string, start, end int64, hash tlog.Hash) ([]byte, error) {
+	// The signed message is in the following format
+	//
+	// struct {
+	//     uint8 label[12] = "subtree/v1\n\0";
+	//     opaque cosigner_name<1..2^8-1>;
+	//     uint64 timestamp;
+	//     opaque log_origin<1..2^8-1>;
+	//     uint64 start;
+	//     uint64 end;
+	//     uint8 hash[32];
+	// } cosigned_message;
+
 	b := &cryptobyte.Builder{}
 	b.AddBytes([]byte("subtree/v1\n\x00"))
+	if len(name) == 0 || len(name) > 255 {
+		return nil, errors.New("cosigner name must be 1-255 bytes")
+	}
 	b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
 		b.AddBytes([]byte(name))
 	})
+	if t > math.MaxInt64 {
+		return nil, errors.New("timestamp is too large")
+	}
+	if t != 0 && start != 0 {
+		return nil, errors.New("timestamp must be zero for non-root subtrees")
+	}
 	b.AddUint64(t)
+	if len(origin) == 0 || len(origin) > 255 {
+		return nil, errors.New("log origin must be 1-255 bytes")
+	}
 	b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) {
-		b.AddBytes([]byte(c.Origin))
+		b.AddBytes([]byte(origin))
 	})
-	b.AddUint64(0)
-	b.AddUint64(uint64(c.N))
-	b.AddBytes(c.Hash[:])
+	b.AddUint64(uint64(start))
+	b.AddUint64(uint64(end))
+	b.AddBytes(hash[:])
 	return b.Bytes()
 }
 
@@ -148,6 +165,7 @@ func formatSubtreeV1(name string, t uint64, msg []byte) ([]byte, error) {
 type CosignatureSigner struct {
 	v    CosignatureVerifier
 	sign func([]byte) ([]byte, error)
+	key  crypto.Signer
 }
 
 func (s *CosignatureSigner) Name() string                    { return s.v.Name() }
@@ -156,6 +174,37 @@ func (s *CosignatureSigner) Sign(msg []byte) ([]byte, error) { return s.sign(msg
 func (s *CosignatureSigner) Verifier() *CosignatureVerifier  { return &s.v }
 
 var _ note.Signer = &CosignatureSigner{}
+
+// SignSubtree signs a subtree [start, end) with the given hash for the log with
+// the given origin. The timestamp is set to zero. The returned signature is in
+// the format of a note signature, starting with the — and ending with a newline.
+func (s *CosignatureSigner) SignSubtree(origin string, start, end int64, hash tlog.Hash) ([]byte, error) {
+	if _, ok := s.v.PublicKey().(*mldsa.PublicKey); !ok {
+		return nil, errors.New("subtree signatures are only supported for ML-DSA-44 keys")
+	}
+	if !ValidSubtree(start, end) {
+		return nil, errors.New("invalid subtree")
+	}
+
+	m, err := subtreeCosignedMessage(s.Name(), 0, origin, start, end, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	ss, err := s.key.Sign(nil, m, crypto.Hash(0))
+	if err != nil {
+		return nil, err
+	}
+
+	// key hash || timestamp || signature.
+	sig := make([]byte, 0, 4+8+mldsa.MLDSA44SignatureSize)
+	sig = binary.BigEndian.AppendUint32(sig, s.KeyHash())
+	sig = binary.BigEndian.AppendUint64(sig, 0)
+	sig = append(sig, ss...)
+
+	res := "— " + s.Name() + " " + base64.StdEncoding.EncodeToString(sig) + "\n"
+	return []byte(res), nil
+}
 
 // CosignatureVerifier is a [note.Verifier] that verifies cosignatures
 // according to c2sp.org/tlog-cosignature.
@@ -285,6 +334,59 @@ func NewCosignatureVerifierFromKey(name string, key crypto.PublicKey) (*Cosignat
 // verifier, depending on the algorithm.
 func (v *CosignatureVerifier) PublicKey() crypto.PublicKey {
 	return v.key
+}
+
+// VerifySubtree reports whether signature is a valid cosignature by this
+// verifier over the subtree [start, end) with the given hash for the log with
+// the given origin.
+//
+// signature must be a single note signature line ending in a newline, like the
+// one returned by [CosignatureSigner.SignSubtree], and its key name and hash
+// must match this verifier.
+//
+// Note that a checkpoint cosignature is a valid cosignature over the equivalent
+// subtree, and this method allows non-zero timestamps for root subtrees.
+func (v *CosignatureVerifier) VerifySubtree(origin string, start, end int64, hash tlog.Hash, signature []byte) bool {
+	k, ok := v.key.(*mldsa.PublicKey)
+	if !ok {
+		return false
+	}
+	if !ValidSubtree(start, end) {
+		return false
+	}
+
+	line, ok := strings.CutSuffix(string(signature), "\n")
+	if !ok {
+		return false
+	}
+	line, ok = strings.CutPrefix(line, "— ")
+	if !ok {
+		return false
+	}
+	name, b64, _ := strings.Cut(line, " ")
+	sig, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || b64 == "" || len(sig) < 4 {
+		return false
+	}
+	if name != v.name || binary.BigEndian.Uint32(sig) != v.hash {
+		return false
+	}
+	sig = sig[4:]
+
+	if len(sig) != 8+mldsa.MLDSA44SignatureSize {
+		return false
+	}
+	t := binary.BigEndian.Uint64(sig)
+	sig = sig[8:]
+	// If start is not zero, the timestamp must be zero.
+	if t > math.MaxInt64 || (start != 0 && t != 0) {
+		return false
+	}
+	m, err := subtreeCosignedMessage(v.name, t, origin, start, end, hash)
+	if err != nil {
+		return false
+	}
+	return mldsa.Verify(k, m, sig, nil) == nil
 }
 
 // String returns the vkey encoding of the verifier, according to
