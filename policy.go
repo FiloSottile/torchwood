@@ -1,6 +1,7 @@
 package torchwood
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -152,7 +153,7 @@ func ParsePolicy(p []byte) (Policy, error) {
 			if len(fields) < 2 {
 				return nil, fmt.Errorf("line %d: invalid log definition: %q", i+1, line)
 			}
-			v, err := note.NewVerifier(fields[1])
+			v, err := newLogVerifier(fields[1])
 			if err != nil {
 				return nil, fmt.Errorf("line %d: invalid log vkey %q: %w", i+1, fields[1], err)
 			}
@@ -224,5 +225,24 @@ func ParsePolicy(p []byte) (Policy, error) {
 			return nil, fmt.Errorf("quorum %q not defined in policy", quorum)
 		}
 		return ThresholdPolicy(2, q, logPolicy), nil
+	}
+}
+
+// newLogVerifier parses a log vkey, which may use the Ed25519 signature
+// algorithm or the ML-DSA-44 (sub)tree cosignature algorithm.
+func newLogVerifier(vkey string) (note.Verifier, error) {
+	_, rest, _ := strings.Cut(vkey, "+")
+	_, key64, _ := strings.Cut(rest, "+")
+	key, err := base64.StdEncoding.DecodeString(key64)
+	if err != nil || len(key) == 0 {
+		return nil, errors.New("malformed verifier id")
+	}
+	switch key[0] {
+	case algEd25519:
+		return note.NewVerifier(vkey)
+	case algCosignatureMLDSA:
+		return NewCosignatureVerifier(vkey)
+	default:
+		return nil, errors.New("unknown verifier algorithm for log vkey")
 	}
 }
