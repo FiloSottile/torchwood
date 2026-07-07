@@ -236,7 +236,7 @@ func testDiskRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	tree := xtree.(*diskTree)
-	defer tree.Close() // relelase pmem on test failure
+	defer tree.Close() // release pmem on test failure
 
 	tree.pmem.SetConstantFlushing(true)
 	tt.tree = tree
