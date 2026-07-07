@@ -5,6 +5,7 @@
 package mpt
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 )
@@ -244,30 +245,32 @@ func (t *memTree) predict(s []node, n *memNode, pbit int, list []KeyVal) ([]node
 }
 
 // Prove returns a proof of the presence or absence of key in t.
-func (t *memTree) Prove(key Key) (Proof, error) {
+func (t *memTree) Prove(key Key) (val Val, ok bool, proof Proof, err error) {
 	if t.err != nil {
-		return nil, t.err
+		return Val{}, false, nil, t.err
 	}
 	if t.dirty {
-		return nil, ErrModifiedTree
+		return Val{}, false, nil, ErrModifiedTree
 	}
 	if t.root == nil {
-		return Proof(proofEmpty), nil
+		return Val{}, false, Proof{}, nil
 	}
-	return t.root.prove(-1, key), nil
+	return t.root.prove(-1, key)
 }
 
-func (n *memNode) prove(pbit int, key Key) Proof {
+func (n *memNode) prove(pbit int, key Key) (val Val, ok bool, proof Proof, err error) {
 	nbit := n.bit()
 	if nbit <= pbit {
 		// view n as leaf
-		var p Proof
 		if n.key == key {
-			p = Proof(proofConfirm)
-		} else {
-			p = append(Proof(proofDeny), n.key[:]...)
+			return n.val, true, Proof{}, nil
 		}
-		return append(p, n.val[:]...)
+		var p Proof
+		p = binary.AppendUvarint(p, uint64(len(n.key)))
+		p = append(p, n.key[:]...)
+		p = binary.AppendUvarint(p, uint64(len(n.val)))
+		p = append(p, n.val[:]...)
+		return Val{}, false, p, nil
 	}
 
 	var sib Hash
@@ -279,7 +282,11 @@ func (n *memNode) prove(pbit int, key Key) Proof {
 		child = n.right
 		sib = n.left.hash(nbit)
 	}
-	return append(append(child.prove(nbit, key), byte(nbit)), sib[:]...)
+
+	val, ok, proof, _ = child.prove(nbit, key)
+	proof = binary.AppendUvarint(proof, uint64(nbit))
+	proof = append(proof, sib[:]...)
+	return
 }
 
 // check checks all the tree invariants, walking the entire tree.

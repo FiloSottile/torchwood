@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"os"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -28,38 +29,38 @@ var goldenTrees = []struct {
 	},
 	{
 		[]Key{h("0...0")},
-		sha(h("00...0"), h("420...0")),
+		sha("\x00\x20", h("00...0"), "\x20", h("420...0")),
 	},
 	{
 		[]Key{h("80...0")},
-		sha(h("80...0"), h("420...0")),
+		sha("\x00\x20", h("80...0"), "\x20", h("420...0")),
 	},
 	{
 		[]Key{h("0...0"), h("80...0")},
 		sha(
-			sha(h("00...0"), h("420...0")),
-			sha(h("80...0"), h("420...01")),
-			"\x00",
+			"\x01\x00",
+			sha("\x00\x20", h("00...0"), "\x20", h("420...0")),
+			sha("\x00\x20", h("80...0"), "\x20", h("420...01")),
 		),
 	},
 	{
 		[]Key{h("0...0"), h("0010...0")},
 		sha(
-			sha(h("0...0"), h("420...0")),
-			sha(h("0010...0"), h("420...01")),
-			"\x0b",
+			"\x01\x0b",
+			sha("\x00\x20", h("0...0"), "\x20", h("420...0")),
+			sha("\x00\x20", h("0010...0"), "\x20", h("420...01")),
 		),
 	},
 	{
 		[]Key{h("0...0"), h("0010...0"), h("80...0")},
 		sha(
+			"\x01\x00",
 			sha(
-				sha(h("0...0"), h("420...0")),
-				sha(h("0010...0"), h("420...01")),
-				"\x0b",
+				"\x01\x0b",
+				sha("\x00\x20", h("0...0"), "\x20", h("420...0")),
+				sha("\x00\x20", h("0010...0"), "\x20", h("420...01")),
 			),
-			sha(h("80...0"), h("420...02")),
-			"\x00",
+			sha("\x00\x20", h("80...0"), "\x20", h("420...02")),
 		),
 	},
 }
@@ -336,12 +337,15 @@ func (tt *testTree) get(key Key, val Val, ok bool) {
 		tt.t.Fatalf("Tree.Snap: %v\n\nLog:\n%s", err, &tt.log)
 	}
 
-	proof, err := tt.tree.Prove(key)
+	v, o, proof, err := tt.tree.Prove(key)
 	if err != nil {
 		tt.t.Fatalf("Tree.Prove: %v\n\nLog:\n%s", err, &tt.log)
 	}
-
-	v, o, err := Verify(snap, key, proof)
+	var vb []byte
+	if o {
+		vb = v[:]
+	}
+	err = Verify(snap, key[:], vb, o, proof)
 	if err != nil {
 		tt.t.Fatalf("Verify %v: %v\nSnap: %v\nProof: %x\n\nLog:\n%s", key, err, snap, proof, &tt.log)
 	}
@@ -411,11 +415,10 @@ func benchmarkProof(b *testing.B, tree Tree, treeSize int) {
 
 	b.ReportAllocs()
 	for b.Loop() {
-		proof, err := tree.Prove(key)
+		_, _, _, err := tree.Prove(key)
 		if err != nil {
 			b.Fatal(err)
 		}
-		_ = proof
 	}
 }
 
@@ -464,4 +467,84 @@ func TestPredict(t *testing.T) {
 		}
 
 	})
+}
+
+func TestVerify(t *testing.T) {
+	file := "testdata/verify.txt"
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		snap     Hash
+		key, val []byte
+		ok       bool
+		proof    Proof
+	)
+	lines := strings.Split(string(data), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		// Join continuation lines (trailing backslash).
+		for strings.HasSuffix(line, "\\") {
+			line = line[:len(line)-1]
+			i++
+			if i < len(lines) {
+				line += lines[i]
+			}
+		}
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		cmd, arg, _ := strings.Cut(line, " ")
+		arg = strings.TrimSpace(arg)
+
+		switch cmd {
+		case "snap":
+			b := decodeHex(t, file, i+1, arg)
+			if len(b) != 32 {
+				t.Fatalf("line %d: snap must be 32 bytes, got %d", i+1, len(b))
+			}
+			snap = Hash(b)
+		case "key":
+			key = decodeHex(t, file, i+1, arg)
+		case "val":
+			if arg == "-" {
+				val = nil
+				ok = false
+			} else {
+				val = decodeHex(t, file, i+1, arg)
+				ok = true
+			}
+		case "proof":
+			proof = Proof(decodeHex(t, file, i+1, arg))
+		case "verify":
+			want := arg == "true"
+			result := Verify(Snapshot{Version: 1, Hash: snap}, key, val, ok, proof)
+			if want && result != nil {
+				t.Errorf("%s:%d: Verify should succeed but got: %v", file, i+1, result)
+			} else if !want && result == nil {
+				t.Errorf("%s:%d: Verify should fail but succeeded", file, i+1)
+			}
+		default:
+			t.Fatalf("%s:%d: unknown directive %q", file, i+1, cmd)
+		}
+	}
+}
+
+func decodeHex(t *testing.T, file string, lineno int, s string) []byte {
+	t.Helper()
+	if s == "''" {
+		return nil
+	}
+	// Remove spaces and tabs from hex string.
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "\t", "")
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		t.Fatalf("%s:%d: bad hex %q: %v", file, lineno, s, err)
+	}
+	return b
 }

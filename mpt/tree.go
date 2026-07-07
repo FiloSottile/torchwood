@@ -3,11 +3,152 @@
 // license that can be found in the LICENSE file.
 
 // Package mpt implements a Merkle Patricia Tree.
+//
+// A Merkle Patricia Tree (MPT) is a map that stores key-value pairs, where
+// each key and value is an opaque value (often a SHA256 hash).
+// Analogous to a [transparent log], an MPT can cryptographically prove
+// that a given key-value pair exists (or that a key does not exist) in a given tree snapshot.
+// By recording the sequence of tree snapshots in a transparent log,
+// a server can publish a record of the history of a key-value database,
+// enabling auditors to check that the database was correct at all times,
+// while allowing clients to be sure the responses they received
+// came from the recorded database history.
+//
+// To use the package, see the [Tree] interface, the [New] and [Create] constructors,
+// and the [Verify] function.
+// The rest of this doc comment describes the tree and proof encodings
+// in enough detail to build an alternate wire-compatible implementation.
+//
+// # Tree Format
+//
+// The tree format used in this package is as follows.
+//
+// Conceptually, start with a complete [binary trie] of arbitrary height H,
+// where H is larger than the number of bits in any key to be stored.
+// Each key-value pair is placed in the tree at the node reached by
+// starting at the root of the tree and following a path making
+// left or right turns according to successive key bits and ends with
+// however many left turns are needed to reach the leaf level
+// (more precisely, the number of trailing left turns is H minus the key size in bits).
+// Now we apply two optimizations to that binary radix tree.
+//
+// First, the tree is “path-compressed,” by removing inner nodes with a single child:
+// a node that would have pointed at a single-child node
+// is replaced by its child, recursively.
+// Every node is therefore either a leaf or an inner node with two children.
+// The path compression ensures that there are exactly N inner nodes for a tree with N+1 leaf nodes,
+// and it makes the height of the tree depend only on the specific set of keys,
+// not on the arbitrary height H.
+//
+// Second, unlike in a normal binary tree, an inner node stores only the bit position
+// that determines whether a lookup should proceed to the left or right child.
+// A lookup walks inner nodes down to some leaf, checking one bit at each step.
+// Only upon reaching the leaf does it do a full key comparison.
+// If it takes O(K) time to compare two keys, a normal binary tree would
+// take O(K log N) time for a walk; this optimization
+// cuts the time to O(K + log N).
+// Furthermore, inner nodes need not store associated keys,
+// cutting the number of stored keys by a factor of two.
+//
+// The path-compression optimization implies that an inner node for key prefix P exists
+// if and only if the tree contains at least one key with prefix P||0 and at least one key with prefix P||1.
+// That is, the specific inner nodes that exist in a tree depend only on which
+// keys are present in the tree, not on their insertion order.
+// This implies that we can batch or otherwise reorder insertions of distinct keys
+// without affecting the final tree structure.
+//
+// Although this package does not yet support them, the tree structure
+// described here supports keys of varying length.
+// However, in such a tree, a lookup for a short key may need to compare
+// additional bits to distinguish the short key from a longer key with
+// the short key as a prefix. In this case, we define that a key of L bytes
+// is treated as if padded with a 0x00 byte at position L followed by 0xFF bytes
+// in all subsequent positions.
+// The 0x00 byte means that, for text keys without NULs,
+// short keys sort before their longer extensions.
+// The subsequent 0xFF bytes ensure that two distinct keys never have
+// the same padded bit sequence, even when one key is a prefix of the other.
+//
+// # Tree Snapshots
+//
+// A tree snapshot is defined as the hash of a tree, defined as follows, where H = SHA256.
+//
+//   - The hash of an empty tree is the hash of an empty (zero-length) input (e3b0c442...7852b855).
+//   - The hash of a leaf node is the hash of a zero byte followed by the length-prefixed key and length-prefixed value: H(0 || len(key) || key || len(val) || val).
+//   - The hash of an inner node is the hash a one byte followed by the node's bit position and its left and right children's hashes: H(1 || bit || left-hash || right-hash).
+//
+// The lengths and bit position are [varint-encoded], so that most are one byte.
+//
+// Notice that the hash of a node representing a subtree is the same
+// as the hash of a tree containing only those nodes: the root node is not special.
+// Although this package does not make use of that fact, it does mean that a
+// large MPT could be split across multiple computers.
+//
+// # Proofs
+//
+// A proof cryptographically attests to a claim about the
+// presence or absence of a specific key in a specific tree snapshot.
+// The claim takes one of two forms:
+//
+//   - The snapshot contains a specific key-value pair.
+//   - The snapshot does not contain a specific key.
+//
+// In this package, a claim and proof are returned by the [Tree.Prove] method,
+// and the caller is expected to have already used the [Tree.Snapshot] method
+// to obtain the snapshot.
+// A verifier (possibly on another system) can then pass the snapshot,
+// claim, and proof to [Verify] to cryptographically verify the claim.
+//
+// The proof only contains the supplemental information needed for verification.
+// It does not include the snapshot or the claim, so the proof can only be checked
+// with respect to a specific snapshot and claim.
+// In fact, a single proof may be valid for many (snapshot, claim) pairs.
+//
+// The specific form of the proof depends on which of three cases is being proved.
+//
+//  1. If the snapshot is for an empty tree, the proof is empty (zero length).
+//     It proves any claim that a key is not present.
+//
+//  2. If the claim is that a specific key-value pair is present in a snapshot,
+//     then the proof is a concatenation of zero or more (bit, sibling hash) pairs
+//     giving the path from the key-value leaf node up to the root of the tree.
+//     The verifier computes the leaf hash from the key and value
+//     and then computes the hashes of successive parent nodes up to the root,
+//     checking that the final hash matches the snapshot.
+//     At each parent node, the key's specified bit position indicates whether
+//     the hash computed so far is the left or right child hash.
+//     The sibling hash provides the other.
+//     In the proof encoding, the bit positions are [varint-encoded].
+//
+//  3. If the claim is that a specific key is not present in a non-empty snapshot,
+//     then a lookup for key in the tree must instead end at some pair altkey-altval,
+//     where altkey ≠ key. The proof consists of the altkey-altval pair, including
+//     varint-encoded length prefixes, followed by the proof that altkey-altval
+//     is in the tree (as in case 2).
+//     The verifier proceeds as in case 2 to confirm that altkey-altval is in the snapshot.
+//     Along the way, it must also check that key and altkey agree at every bit position
+//     in the path, confirming that the lookup for key would indeed end at altkey instead.
+//
+// For a tree storing N-bit keys, the longest existence proof is N-1 (bit, sibling hash) pairs,
+// while the longest non-existence proof is a key, a value, and N (bit, sibling hash) pairs.
+// In both cases the worst case length is dominated by the hashes, about 32N bytes.
+// A tree using random keys (for example, using SHA256 hashes as keys)
+// would of course never reach this maximum length for any sizable N.
+//
+// Note that this encoding is considerably more compact than some others.
+// In particular, the [Rust akd crate's MembershipProof] includes the inner node key
+// and sibling key for each step in the path, tripling the size of the proofs.
+//
+// [binary trie]: https://en.wikipedia.org/wiki/Trie
+// [transparent log]: https://research.swtch.com/tlog
+// [varint-encoded]: https://protobuf.dev/programming-guides/encoding/#varints
+// [Rust akd crate's MembershipProof]: https://docs.rs/akd/0.12.0/akd/struct.MembershipProof.html
 package mpt
 
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -49,9 +190,16 @@ type Tree interface {
 	// set the version.
 	Snap(version int64) (Snapshot, error)
 
-	// Prove looks up key in the tree and returns a proof
-	// either of key's value or that key is not present.
-	// Use [Verify] to retrieve the lookup result.
+	// Prove looks up key in the tree and returns a claimed
+	// associated value (if any) and whether the key is present at all,
+	// along with a proof of those two claimed results.
+	// Use [Verify] to verify the proof before trusting the claims.
+	//
+	// If Prove returns normally (with err == nil), then proof is non-nil,
+	// although it may be empty.
+	//
+	// If Prove returns a non-nil error error, then val is Val{},
+	// ok is false, and proof is nil.
 	//
 	// Prove is a read-only operation and can be called
 	// concurrently with other calls to Prove, but not other
@@ -60,7 +208,7 @@ type Tree interface {
 	// It is an error to call Prove if Set has been called without
 	// a subsequent call to Snap: in that case, the caller does not
 	// know what the root hash is, so the proof will be unverifiable.
-	Prove(key Key) (Proof, error)
+	Prove(key Key) (val Val, ok bool, proof Proof, err error)
 
 	// Sync flushes all changes from past Set and Snap calls to
 	// the underlying files and then calls the files' Sync methods
@@ -258,93 +406,119 @@ func TreeHash(seq iter.Seq[KeyVal]) Hash {
 // specific snapshot of a Tree.
 type Proof []byte
 
-// Proof Format
-//
-// Proofs start with "mptproof", followed by a one-byte tag that determines
-// the format of the additional data. The tags are:
-//
-//   - 0: proof of empty tree; no data
-//   - 1: proof key is in tree; data is value and path
-//   - 2: proof key in not in tree; data is alt key, value, and path
-//
-// The proof of an empty tree carries no data; to verify the proof is to check that the
-// tree snapshot is the empty tree hash.
-//
-// The proof of a key being in the tree is the key's value followed by the
-// path from that key-value pair up to the tree root.
-// For each node along the path, the data contains a one-byte overlap count
-// (the number of bits shared by the left and right children of the node)
-// and the 32-byte hash of the sibling not on the path.
-// Verifying the proof requires computing the leaf hash corresponding to key-value
-// and then combining that leaf hash with the overlap counts and sibling hashes,
-// eventually producing a root tree hash that must match the tree snapshot.
-//
-// The proof of a key not being in the tree is an alternate key-value pair
-// followed by the path from that key-value pair up to the tree root.
-// Verifying the proof requires checking that the alt-key is not equal to the
-// target key, then recomputing the tree hash from alt-key-value and path.
-// During the recomputation, the verifier must check that for every overlap count
-// in the path, the target key and the alt-key agree at that bit position,
-// verifying that a search for the target would find the alt-key instead.
-const (
-	proofMagic   = "mptproof"
-	proofEmpty   = proofMagic + "\x00"
-	proofConfirm = proofMagic + "\x01"
-	proofDeny    = proofMagic + "\x02"
-)
-
 var (
-	// ErrMalformedProof indicates that a proof is not formatted correctly.
-	ErrMalformedProof = errors.New("malformed mpt proof")
+	// ErrInvalidProof indicates that a proof is not valid for the claimed result.
+	ErrInvalidProof = errors.New("invalid mpt proof")
 
-	// ErrMismatchedProof indicates that a proof does not match
-	// the snapshot and key passed to Verify.
-	ErrMismatchedProof = errors.New("mismatched mpt proof")
+	// ErrInvalidLookup indicates that ok is false but val is non-empty.
+	ErrInvalidLookup = errors.New("invalid mpt lookup result")
 )
 
-// Verify verifies that p is a valid proof of a lookup for key in snap,
-// returning the proved lookup result (val, ok).
-// If the proof is not valid for key in snap, Verify returns a non-nil error.
-func Verify(snap Snapshot, key Key, proof Proof) (val Val, ok bool, err error) {
-	if string(proof) == proofEmpty {
+// Verify verifies that p is a valid proof that a lookup for key in snap
+// should return the result (val, ok).
+// If the proof is not valid, Verify returns a non-nil error.
+//
+// [VerifyPresent] and [VerifyNotPresent] are convenience functions
+// that wrap Verify.
+func Verify(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
+	if !ok && len(val) != 0 {
+		return ErrInvalidLookup
+	}
+	if !ok && len(proof) == 0 {
 		if snap.Hash == emptyTreeHash() {
-			return Val{}, false, nil
+			return nil
 		}
-		return Val{}, false, ErrMismatchedProof
+		return ErrInvalidProof
 	}
 
-	var data []byte
-	var pkey Key
-	if data, ok = bytes.CutPrefix(proof, []byte(proofConfirm)); ok && len(data) >= 32 {
+	var pkey []byte
+	var h Hash
+	if ok {
 		pkey = key
-		val, data = Val(data[:32]), data[32:]
-	} else if data, ok = bytes.CutPrefix(proof, []byte(proofDeny)); ok && len(data) >= 64 {
-		pkey, val, data = Key(data[:32]), Val(data[32:64]), data[64:]
-		if pkey == key {
-			return Val{}, false, ErrMalformedProof
+		h = hashLeafVar(key, val)
+	} else {
+		var pval []byte
+		var ok bool
+		pkey, proof, ok = cutVar(proof)
+		if !ok {
+			return ErrInvalidProof
 		}
+		pval, proof, ok = cutVar(proof)
+		if !ok {
+			return ErrInvalidProof
+		}
+		if bytes.Equal(pkey, key) {
+			return ErrInvalidProof
+		}
+		h = hashLeafVar(pkey, pval)
 	}
-	h := hashLeaf(pkey, val)
-	b := 256
-	for len(data) >= 1+32 && int(data[0]) < b {
-		var sib Hash
-		b, sib, data = int(data[0]), Hash(data[1:1+32]), data[1+32:]
-		if key.bit(b) != pkey.bit(b) {
-			return Val{}, false, ErrMalformedProof
+
+	b := 1 << 30
+	for len(proof) > 0 {
+		ub, n := binary.Uvarint(proof)
+		if n <= 0 || ub >= uint64(b) {
+			break
 		}
-		if key.bit(b) == 0 {
+		b = int(ub)
+		proof = proof[n:]
+		if len(proof) < 32 {
+			return ErrInvalidProof
+		}
+		var sib Hash
+		sib, proof = Hash(proof[:32]), proof[32:]
+		if bit(key, b) != bit(pkey, b) {
+			return ErrInvalidProof
+		}
+		if bit(key, b) == 0 {
 			h = hashInner(b, h, sib)
 		} else {
 			h = hashInner(b, sib, h)
 		}
 	}
-	if len(data) != 0 || h != snap.Hash {
-		return Val{}, false, ErrMalformedProof
+	if len(proof) != 0 || h != snap.Hash {
+		return ErrInvalidProof
 	}
-	if pkey == key {
-		return val, true, nil
+	return nil
+}
+
+// VerifyPresent is shorthand for [Verify](snap, key[:], val[:], true, proof).
+func VerifyPresent(snap Snapshot, key Key, val Val, proof Proof) error {
+	return Verify(snap, key[:], val[:], true, proof)
+}
+
+// VerifyNotPresent is shorthand for [Verify](snap, key[:], nil, false, proof).
+func VerifyNotPresent(snap Snapshot, key Key, proof Proof) error {
+	return Verify(snap, key[:], nil, false, proof)
+}
+
+// bit returns the n'th bit of the byte slice b, extended with padding.
+// A key is padded with a 0x00 byte followed by arbitrarily many 0xFF bytes.
+func bit(b []byte, n int) int {
+	i := n >> 3
+	if i < len(b) {
+		return (int(b[i]) >> (7 - n&7)) & 1
 	}
-	return Val{}, false, nil
+	if i == len(b) {
+		return 0
+	}
+	return 1
+}
+
+// hashLeafVar returns the hash of a leaf with a given key and value,
+// where key and val are variable-length byte slices.
+// The hash is H(0 || len(key) || key || len(val) || val),
+// where the lengths are varint-encoded.
+func hashLeafVar(key, val []byte) Hash {
+	h := sha256.New()
+	h.Write([]byte{0})
+	var buf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(buf[:], uint64(len(key)))
+	h.Write(buf[:n])
+	h.Write(key)
+	n = binary.PutUvarint(buf[:], uint64(len(val)))
+	h.Write(buf[:n])
+	h.Write(val)
+	return Hash(h.Sum(nil))
 }
 
 // emptyTreeHash returns the parent hash for a root no child nodes.
@@ -354,22 +528,47 @@ func emptyTreeHash() Hash {
 }
 
 // hashLeaf returns the hash of a leaf with a given key and value.
+// The hash is H(0 || len(key) || key || len(val) || val),
+// where the lengths are varint-encoded.
 func hashLeaf(key Key, val Val) Hash {
-	var kv [64]byte
-	copy(kv[:32], key[:])
-	copy(kv[32:64], val[:])
-	h := sha256.Sum256(kv[:])
-	return h
+	// 0 tag + varint(32) + 32 + varint(32) + 32 = 1+1+32+1+32 = 67
+	var buf [67]byte
+	buf[0] = 0
+	n := 1
+	n += binary.PutUvarint(buf[n:], uint64(len(key)))
+	n += copy(buf[n:], key[:])
+	n += binary.PutUvarint(buf[n:], uint64(len(val)))
+	n += copy(buf[n:], val[:])
+	return sha256.Sum256(buf[:n])
 }
 
 // hashInner returns the hash of an inner node
 // with the given bit position and left and right child hashes.
+// The hash is H(1 || bit || left-hash || right-hash),
+// where the bit is varint-encoded.
 func hashInner(b int, left, right Hash) Hash {
-	var enc [65]byte
-	copy(enc[:32], left[:])
-	copy(enc[32:64], right[:])
-	enc[64] = byte(b)
-	return sha256.Sum256(enc[:])
+	// 1 tag + varint(bit) + 32 + 32; varint(bit) ≤ 2 bytes for bit ≤ 255
+	var buf [67]byte
+	buf[0] = 1
+	n := 1
+	n += binary.PutUvarint(buf[n:], uint64(b))
+	n += copy(buf[n:], left[:])
+	n += copy(buf[n:], right[:])
+	return sha256.Sum256(buf[:n])
+}
+
+// cutVar cuts a varint-length-prefixed value from the start of data,
+// returning the value and the rest of the data.
+func cutVar(data []byte) (value, rest []byte, ok bool) {
+	x, n := binary.Uvarint(data)
+	if n <= 0 {
+		return nil, nil, false
+	}
+	data = data[n:]
+	if uint64(len(data)) < x {
+		return nil, nil, false
+	}
+	return data[:x], data[x:], true
 }
 
 func reduce(s []node) []node {
