@@ -96,9 +96,9 @@ var (
 	// In the worst case, the framing of every data byte in
 	// a mutation might be framed by a maxVarint-byte offset
 	// and a 1-byte count. That's 1MB*8 = 8 MB.
-	// There needs to be headroom for the memory-length patch,
-	// so the minimum would be 8MB + 8 bytes, but we bump the
-	// patch block size to 16 MB instead.
+	// There needs to be headroom for the memory-length and
+	// disk-length patches, so the minimum would be 8MB + 16 bytes,
+	// but we bump the patch block size to 16 MB instead.
 	maxPatch = 16 << 20
 )
 
@@ -143,10 +143,21 @@ func (*devNull) Sync() error { return nil }
 // to larger sizes using [Mem.Expand].
 // (Shrinking the memory is not implemented.)
 //
-// Mutations can be grouped into atomic transactions using
+// Alongside the memory, a third disk file holds “disk-only” storage
+// accessed by [Mem.ReadDisk] and [Mem.WriteDisk].
+// This storage is not held in memory, only on disk.
+//
+// By default, each [Mem.Mutate] or [Mem.WriteDisk] is a separate
+// sequenced, atomic transaction. If a program crashes and the Mem is reopened,
+// the state of the memory is guaranteed to correspond to the state after
+// some arbitrary transaction.
+// The state of the disk is guaranteed to include all the writes through that
+// transaction, but it may also include later writes that were not recovered.
+//
+// Mutations and disk writes can be grouped into larger transactions using
 // [Mem.BeginGroup] and [Mem.EndGroup].
 //
-// Calling [Mem.Sync] ensures that all modifications have been flushed
+// Calling [Mem.Sync] ensures that all transactions have been flushed
 // to the underlying files, guaranteeing that a future [Open] will observe them.
 //
 // Calling [Mem.Close] closes the memory and leaves the mapping unreadable.
@@ -154,23 +165,25 @@ func (*devNull) Sync() error { return nil }
 // Those accesses will fault, meaning they crash the program unless
 // [runtime/debug.SetPanicOnFault] has been used.
 type Mem struct {
-	magic     string
-	id        [16]byte
-	tmp       [frameExtra]byte
-	ptmp      [2 * binary.MaxVarintLen64]byte
-	span      *span.Span
-	mem       []byte
-	patched   int // length of “patched” section of memory
-	current   *writer
-	next      *writer
-	disk      File  // disk-only (not in memory) storage
-	diskOff   int64 // offset where user writes begin
-	patch     []byte
-	group     int // group start in patch, or -1 if not in group
-	groupData int // total group data
-	err       error
-	closed    bool
-	compact   compact
+	magic       string
+	id          [16]byte
+	tmp         [frameExtra]byte
+	ptmp        [2 * binary.MaxVarintLen64]byte
+	span        *span.Span
+	mem         []byte
+	patched     int // length of “patched” section of memory
+	current     *writer
+	next        *writer
+	disk        File  // disk-only (not in memory) storage
+	diskOff     int64 // offset where user writes begin
+	diskSize    int64 // logical size of disk-only data
+	diskPatched int64 // last diskSize recorded in patch
+	patch       []byte
+	group       int // group start in patch, or -1 if not in group
+	groupData   int // total group data
+	err         error
+	closed      bool
+	compact     compact
 
 	constantFlushing bool
 
@@ -401,6 +414,7 @@ func open(magic string, file1, file2, disk File) (_ *Mem, err error) {
 	if err := m.readFile(r1); err != nil {
 		return nil, err
 	}
+	m.diskPatched = m.diskSize
 	m.current = newWriter(r1.file, r1.seq)
 	m.current.off = r1.off
 	m.next = newWriter(r2.file, 0)
@@ -552,9 +566,12 @@ func (m *Mem) replay(patch []byte) error {
 		}
 		if isDisk {
 			// disk patch
-			if _, err := m.disk.WriteAt(patch[:count], m.diskOff+int64(off)); err != nil {
-				return m.broken(err)
+			if count > 0 {
+				if _, err := m.disk.WriteAt(patch[:count], m.diskOff+int64(off)); err != nil {
+					return m.broken(err)
+				}
 			}
+			m.diskSize = max(m.diskSize, int64(off+count))
 		} else {
 			// memory patch
 			if off+count > uint64(len(m.mem)) {
@@ -607,16 +624,30 @@ func (m *Mem) Offset(b []byte) (offset int, ok bool) {
 	return int(off), ok
 }
 
-// BeginGroup starts an atomic mutation group.
-// Expand and Mutate calls between Begin and [Mem.EndGroup]
-// are guaranteed to be observed as an atomic unit
-// upon reloading the memory: either they will all be
-// present or none of them will be.
+// BeginGroup starts an atomic mutation group (a transaction).
+//
 // Calls to BeginGroup must be followed eventually by a call to EndGroup
 // and cannot be nested: it is an error to call BeginGroup twice
 // without an intervening EndGroup.
 //
-// A group is limited to mutation of at most MaxGroupBytes bytes of mutated data.
+// For the Expand, Mutate, and WriteDisk calls between Begin and [Mem.EndGroup],
+// there are three possible outcomes after a Mem has been reloaded:
+//
+//  1. All of the effects will be observed (group reloaded).
+//  2. None of the effects will be observed (group not reloaded).
+//  3. No memory effects will be observed, and the WriteDisk calls
+//     will not be observable by [Mem.DiskSize], but some or all of the
+//     disk writes could still be observed by [Mem.ReadDisk].
+//
+// Considering only the memory, the group is an atomic unit,
+// either fully observed or not observed at all.
+// The disk is added to the group in a one-sided manner:
+// if the memory changes are observed, then all the disk changes are observed too,
+// but not the reverse: later disk changes (all of them or a subset of them) can be observed
+// without their corresponding memory changes.
+//
+// A group is limited to mutation of at most MaxGroupBytes bytes of data
+// modified by the combination of Mutate and WriteDisk.
 func (m *Mem) BeginGroup() error {
 	if m.err != nil {
 		return m.err
@@ -625,11 +656,15 @@ func (m *Mem) BeginGroup() error {
 		return fmt.Errorf("atomic mutation group already begun")
 	}
 
-	// Patch buffer always has room to add an empty mutation
-	// at the end of the memory, to represent the most recent Expand.
-	// If the group grows too large, we will flush up to but not
-	// including the group, so add the empty mutation now.
+	// Patch buffer always has room to add empty mutations
+	// at the end of the memory and disk, to represent the most
+	// recent Expand/WriteDisk. If the group grows too large,
+	// we will flush up to but not including the group,
+	// so add the empty mutations now.
 	if err := m.addMemLenPatch(); err != nil {
+		return err
+	}
+	if err := m.addDiskLenPatch(); err != nil {
 		return err
 	}
 
@@ -665,9 +700,9 @@ func (m *Mem) Mutate(dst, src []byte) error {
 
 // WriteDisk writes src to the disk-only file at offset off.
 // It guarantees that on recovery after a crash,
-// all disk writes that occurred before the latest recovered Mutate
-// will be available for reading.
-// (Disk writes that happened after that Mutate may or may not
+// all disk writes that occurred in or before
+// the latest recovered transaction will be available for reading.
+// (Disk writes that happened after that transaction may or may not
 // be available for reading as well.)
 func (m *Mem) WriteDisk(src []byte, off int64) error {
 	if m.err != nil {
@@ -681,6 +716,8 @@ func (m *Mem) WriteDisk(src []byte, off int64) error {
 		if err != nil {
 			return m.broken(err)
 		}
+		m.diskSize = max(m.diskSize, off+int64(len(src)))
+		m.diskPatched = max(m.diskPatched, off+int64(len(src)))
 		return nil
 	})
 }
@@ -690,6 +727,12 @@ func (m *Mem) ReadDisk(dst []byte, off int64) error {
 	if m.err != nil {
 		return m.err
 	}
+	if off < 0 || off > m.diskSize || int64(len(dst)) > m.diskSize-off {
+		return fmt.Errorf("disk read out of range")
+	}
+	if len(dst) == 0 {
+		return nil
+	}
 	_, err := m.disk.ReadAt(dst, m.diskOff+off)
 	if err != nil {
 		if err == io.EOF {
@@ -698,6 +741,16 @@ func (m *Mem) ReadDisk(dst []byte, off int64) error {
 		return m.broken(err)
 	}
 	return nil
+}
+
+// DiskSize returns the logical size of the disk-only data.
+// This is the maximum offset+length across all WriteDisk calls.
+// On recovery after a crash, DiskSize will be the logical disk size
+// as of the latest recovered transaction, even if additional disk
+// writes to larger offsets happened after that transaction and
+// are still present in the file.
+func (m *Mem) DiskSize() int64 {
+	return m.diskSize
 }
 
 // mutate logs a write to the patch block, starting a new patch block if necessary.
@@ -722,7 +775,7 @@ func (m *Mem) mutate(off uint64, src []byte, commit func() error) error {
 	p := m.ptmp[:0]
 	p = binary.AppendUvarint(p, off)
 	p = binary.AppendUvarint(p, uint64(len(src)))
-	if len(m.patch)+len(p)+len(src)+maxVarint+1 > maxPatch {
+	if len(m.patch)+len(p)+len(src)+2*(maxVarint+1) > maxPatch {
 		if err := m.flushPatch(true); err != nil {
 			return err
 		}
@@ -766,6 +819,9 @@ func (m *Mem) flushPatch(needSpace bool) error {
 		if err := m.addMemLenPatch(); err != nil {
 			return err
 		}
+		if err := m.addDiskLenPatch(); err != nil {
+			return err
+		}
 		p = m.patch
 	}
 	if len(p) == 0 {
@@ -803,6 +859,10 @@ func (m *Mem) EndGroup() error {
 		m.mutate(uint64(len(m.mem))<<1, nil, nil)
 		m.patched = len(m.mem)
 	}
+	if m.diskPatched != m.diskSize {
+		m.mutate(uint64(m.diskSize)<<1|1, nil, nil)
+		m.diskPatched = m.diskSize
+	}
 	m.group = -1
 
 	if m.next.seq > 0 && m.compact.off == m.compact.end && len(m.patch) > 0 {
@@ -824,6 +884,22 @@ func (m *Mem) addMemLenPatch() error {
 	m.patch = binary.AppendUvarint(m.patch, uint64(len(m.mem))<<1)
 	m.patch = binary.AppendUvarint(m.patch, 0)
 	m.patched = len(m.mem)
+	return nil
+}
+
+// addDiskLenPatch adds a final "disk length" patch to m.patch.
+// This records the current disk data size so that on replay,
+// DiskSize is correctly initialized.
+func (m *Mem) addDiskLenPatch() error {
+	if m.disk == nil || m.diskPatched == m.diskSize {
+		return nil
+	}
+	if len(m.patch)+maxVarint+1 > maxPatch {
+		return m.broken(fmt.Errorf("pmem internal patch overflow"))
+	}
+	m.patch = binary.AppendUvarint(m.patch, uint64(m.diskSize)<<1|1)
+	m.patch = binary.AppendUvarint(m.patch, 0)
+	m.diskPatched = m.diskSize
 	return nil
 }
 
@@ -858,7 +934,7 @@ func (m *Mem) writeFrame(w *writer, data []byte) error {
 func (m *Mem) maybeCompact(n int) error {
 	if m.next.seq == 0 && m.current.off < 2*int64(len(m.mem)) {
 		// Current disk file is less than twice the tree memory.
-		// Not worth compacting yem.
+		// Not worth compacting yet.
 		return nil
 	}
 
@@ -936,6 +1012,15 @@ func (m *Mem) maybeCompact(n int) error {
 		if err := m.disk.Sync(); err != nil {
 			return m.broken(err)
 		}
+		// Write a disk-length patch to m.next so that on recovery
+		// DiskSize is correctly initialized from the compacted file.
+		var diskLenPatch []byte
+		diskLenPatch = binary.AppendUvarint(diskLenPatch, uint64(m.diskSize)<<1|1)
+		diskLenPatch = binary.AppendUvarint(diskLenPatch, 0)
+		if err := m.writeFrame(m.next, diskLenPatch); err != nil {
+			return err
+		}
+		m.diskPatched = m.diskSize
 	}
 
 	// Open will start using the tree when the bigger sequence number hits the disk,
@@ -959,6 +1044,7 @@ func (m *Mem) maybeCompact(n int) error {
 	setCurrent(m.current.file, true, int(m.current.off))
 	setCurrent(m.next.file, false, int(m.next.off))
 	m.next.seq = 0
+	m.diskPatched = m.diskSize
 	return nil
 }
 

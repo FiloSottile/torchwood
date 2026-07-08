@@ -3,7 +3,6 @@
 // license that can be found in the LICENSE file.
 
 // TODO test constant flushing mode
-// TODO test recovery of disk writes
 
 package pmem
 
@@ -34,14 +33,16 @@ func testRecovery(t *testing.T) {
 	}()
 
 	maxPatch = 256
-	maxMem = 1 << 30
+	maxMem = 1 << 20
 
 	tt := &tester{t: t}
 	for i := range tt.file {
 		tt.file[i].tester = tt
 	}
+	tt.disk.tester = tt
+	tt.disk.isDisk = true
 
-	mem, err := Create("magic", &tt.file[0], &tt.file[1], nil)
+	mem, err := Create("magic", &tt.file[0], &tt.file[1], &tt.disk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,8 +53,9 @@ func testRecovery(t *testing.T) {
 		MaxOff   = 100
 		MaxCount = 100
 	)
+	var diskOff int64
 	for range 1000 {
-		switch rand.N(10) {
+		switch rand.N(12) {
 		case 0, 1, 2, 3, 4:
 			// Write many random memory sections,
 			// more than will fit in a single patch block.
@@ -90,7 +92,19 @@ func testRecovery(t *testing.T) {
 			tt.markOK()
 			check(tt.t, mem.EndGroup())
 
-		case 9:
+		case 9, 10:
+			// Write to disk, sometimes overwriting existing data.
+			dn := 1 + rand.N(20)
+			off := diskOff
+			if diskOff > 0 && rand.N(2) == 0 {
+				off = rand.Int64N(diskOff)
+			}
+			tt.t.Logf("writedisk %#x+%#x", off, dn)
+			tt.markOK()
+			check(tt.t, mem.WriteDisk(randFill(tmp[:dn]), off))
+			diskOff = max(diskOff, off+int64(dn))
+
+		case 11:
 			// Sync.
 			tt.t.Logf("sync")
 			check(tt.t, mem.Sync())
@@ -101,13 +115,89 @@ func testRecovery(t *testing.T) {
 	check(t, mem.UnsafeUnmap())
 }
 
+func TestDiskSizeAfterCompaction(t *testing.T) {
+	oldPatch := maxPatch
+	oldMem := maxMem
+	defer func() {
+		maxPatch = oldPatch
+		maxMem = oldMem
+	}()
+
+	maxPatch = 256
+	maxMem = 1 << 16
+
+	// Use simple testFiles with a tester that doesn't do reopens.
+	// Setting tt.mem = nil prevents try() from doing anything.
+	var file [2]testFile
+	var disk testFile
+	disk.isDisk = true
+
+	tt := &tester{t: t}
+	for i := range file {
+		file[i].tester = tt
+	}
+	disk.tester = tt
+	tt.valid = make(map[string]bool)
+
+	mem, err := Create("magic", &file[0], &file[1], &disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Don't set tt.mem - this keeps try() from reopening on every write.
+
+	// Write some disk data so diskSize > 0.
+	diskData := make([]byte, 50)
+	randFill(diskData)
+	check(t, mem.WriteDisk(diskData, 0))
+	if mem.DiskSize() != 50 {
+		t.Fatalf("DiskSize = %d, want 50", mem.DiskSize())
+	}
+
+	// Write enough memory mutations to trigger compaction.
+	// Compaction starts when the current file exceeds 2× the tree size.
+	// With maxPatch=256 and small memory, a few flushes will do it.
+	tmp := make([]byte, 100)
+	for i := range 200 {
+		off := i % 50
+		_, err := mem.Expand(off + 100)
+		check(t, err)
+		check(t, mem.Mutate(mem.Data()[off:off+100], randFill(tmp)))
+	}
+	// Sync to finalize any in-progress compaction.
+	check(t, mem.Sync())
+
+	wantDiskSize := mem.DiskSize()
+	if wantDiskSize != 50 {
+		t.Fatalf("DiskSize before reopen = %d, want 50", wantDiskSize)
+	}
+
+	// Simulate a crash by reopening from the current file state.
+	diskClone := disk.clone()
+	diskClone.tester = tt
+	diskClone.isDisk = true
+	mem2, err := Open("magic", file[0].clone(), file[1].clone(), diskClone)
+	if err != nil {
+		t.Fatalf("reopen after compaction: %v", err)
+	}
+	if mem2.DiskSize() != wantDiskSize {
+		t.Fatalf("after compaction reopen: DiskSize = %d, want %d", mem2.DiskSize(), wantDiskSize)
+	}
+	check(t, mem2.Release())
+	check(t, mem2.UnsafeUnmap())
+
+	check(t, mem.Release())
+	check(t, mem.UnsafeUnmap())
+}
+
 func TestWriteAfterOpen(t *testing.T) {
 	tt := &tester{t: t}
 	for i := range tt.file {
 		tt.file[i].tester = tt
 	}
+	tt.disk.tester = tt
+	tt.disk.isDisk = true
 
-	m, err := Create("magic", &tt.file[0], &tt.file[1], nil)
+	m, err := Create("magic", &tt.file[0], &tt.file[1], &tt.disk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,11 +210,13 @@ func TestWriteAfterOpen(t *testing.T) {
 	_, err = m.Expand(len(first))
 	check(t, err)
 	check(t, m.Mutate(m.Data(), first))
+	firstDisk := []byte("disk data")
+	check(t, m.WriteDisk(firstDisk, 0))
 	check(t, m.Sync())
 	check(t, m.Release())
 	check(t, m.UnsafeUnmap())
 
-	m, err = Open("magic", &tt.file[0], &tt.file[1], nil)
+	m, err = Open("magic", &tt.file[0], &tt.file[1], &tt.disk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +227,9 @@ func TestWriteAfterOpen(t *testing.T) {
 	if !bytes.Equal(m.Data(), first) {
 		t.Errorf("opened data %q, want %q", m.Data(), first)
 	}
+	if m.DiskSize() != int64(len(firstDisk)) {
+		t.Errorf("opened DiskSize %d, want %d", m.DiskSize(), len(firstDisk))
+	}
 
 	// Frames written after Open carry m.id, so if Open did not restore it
 	// from the files, the writes below would be stamped with a zero ID and
@@ -143,11 +238,16 @@ func TestWriteAfterOpen(t *testing.T) {
 	_, err = m.Expand(len(second))
 	check(t, err)
 	check(t, m.Mutate(m.Data(), second))
+	secondDisk := []byte("disk data written after reopen")
+	check(t, m.WriteDisk(secondDisk, 0))
 	check(t, m.Sync())
 	check(t, m.Release())
 	check(t, m.UnsafeUnmap())
 
-	m2, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), nil)
+	diskClone := tt.disk.clone()
+	diskClone.tester = tt // writable, for patch replay
+	diskClone.isDisk = true
+	m2, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), diskClone)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +256,14 @@ func TestWriteAfterOpen(t *testing.T) {
 	}
 	if !bytes.Equal(m2.Data(), second) {
 		t.Errorf("reopened data %q, want %q", m2.Data(), second)
+	}
+	if m2.DiskSize() != int64(len(secondDisk)) {
+		t.Errorf("reopened DiskSize %d, want %d", m2.DiskSize(), len(secondDisk))
+	}
+	gotDisk := make([]byte, len(secondDisk))
+	check(t, m2.ReadDisk(gotDisk, 0))
+	if !bytes.Equal(gotDisk, secondDisk) {
+		t.Errorf("reopened disk data %q, want %q", gotDisk, secondDisk)
 	}
 	check(t, m2.Release())
 	check(t, m2.UnsafeUnmap())
@@ -169,17 +277,26 @@ func randFill(b []byte) []byte {
 }
 
 type tester struct {
-	t     *testing.T
-	mem   *Mem
-	file  [2]testFile
-	valid map[string]bool // hashes of acceptable memory images
+	t         *testing.T
+	mem       *Mem
+	file      [2]testFile
+	disk      testFile
+	valid     map[string]bool                // hashes of acceptable memory images
+	validDisk map[string]map[int64][]byteSet // for each mem hash & valid disk size, valid disk bytes by offset
 }
+
+// byteSet is a bitmap of 256 bits, one per possible byte value.
+type byteSet [4]uint64
+
+func (s *byteSet) add(b byte)      { s[b/64] |= 1 << (b % 64) }
+func (s *byteSet) has(b byte) bool { return s[b/64]&(1<<(b%64)) != 0 }
 
 type testFile struct {
 	tester  *tester
 	data    []byte // data in file
 	sync    int    // offset of last sync; writes only append
 	current bool   // whether file is current
+	isDisk  bool   // whether this is a disk file (not a memory file)
 }
 
 func (f *testFile) setCurrent(current bool, off int) {
@@ -225,7 +342,10 @@ func (f *testFile) WriteAt(data []byte, off int64) (int, error) {
 	f.data = append(f.data, data[n:]...)
 
 	// Try corrupting the writes and see what happens.
-	f.tester.try(f)
+	// Only test memory files; disk file integrity doesn't affect recovery.
+	if !f.isDisk {
+		f.tester.try(f)
+	}
 
 	return len(data), nil
 }
@@ -242,7 +362,10 @@ func (f *testFile) name() string {
 	if f == &f.tester.file[0] {
 		return "file0"
 	}
-	return "file1"
+	if f == &f.tester.file[1] {
+		return "file1"
+	}
+	return "disk"
 }
 
 // Sync syncs the test file.
@@ -254,7 +377,9 @@ func (f *testFile) Sync() error {
 
 	f.sync = len(f.data)
 	f.tester.t.Logf("%s sync at %#x", f.name(), f.sync)
-	f.tester.try(f)
+	if !f.isDisk {
+		f.tester.try(f)
+	}
 	return nil
 }
 
@@ -265,9 +390,10 @@ func (tt *tester) setMem(mem *Mem) {
 	if tt.valid == nil {
 		tt.valid = make(map[string]bool)
 	}
-	h := tt.mem.hash()
-	tt.t.Logf("initial hash %v", h)
-	tt.valid[h] = true
+	if tt.validDisk == nil {
+		tt.validDisk = make(map[string]map[int64][]byteSet)
+	}
+	tt.markOK()
 }
 
 func (tt *tester) markOK() {
@@ -275,10 +401,43 @@ func (tt *tester) markOK() {
 	h := tt.mem.hash()
 	tt.t.Logf("ok %s", h)
 	tt.valid[h] = true
+
+	// Track valid disk sizes and byte values for this memory state.
+	//
+	// When recovery restores memory image h, patch replay resets the disk
+	// bytes written up through h to their values as of h. But bytes written
+	// only by later (discarded) transactions may still survive on disk,
+	// because physical disk writes are never undone. So the bytes valid for
+	// (h, size) are the bytes as of (h, size), plus the bytes from every state
+	// that follows it up to the next sync.
+	//
+	// We build this incrementally: at each state we OR the current disk bytes
+	// into the byte sets of every (h, size) pair seen since the last sync.
+	if tt.validDisk[h] == nil {
+		tt.validDisk[h] = make(map[int64][]byteSet)
+	}
+	size := tt.mem.DiskSize()
+	if _, ok := tt.validDisk[h][size]; !ok {
+		tt.validDisk[h][size] = make([]byteSet, size)
+	}
+
+	if tt.mem.disk != nil && size > 0 {
+		data := make([]byte, size)
+		tt.mem.disk.ReadAt(data, tt.mem.diskOff)
+
+		for _, sizes := range tt.validDisk {
+			for s, vd := range sizes {
+				for i := int64(0); i < s && i < size; i++ {
+					vd[i].add(data[i])
+				}
+			}
+		}
+	}
 }
 
 func (tt *tester) syncHook() {
 	clear(tt.valid) // older snapshots no longer acceptable
+	clear(tt.validDisk)
 	tt.markOK()
 }
 
@@ -322,7 +481,10 @@ func (tt *tester) try(f *testFile) {
 
 func (tt *tester) reopen(format string, args ...any) {
 	kind := fmt.Sprintf(format, args...)
-	mem, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), nil)
+	diskClone := tt.disk.clone()
+	diskClone.tester = tt // writable, for patch replay
+	diskClone.isDisk = true
+	mem, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), diskClone)
 	if err != nil {
 		tt.t.Fatalf("reopen: %s: %v\n\n%s", kind, err, hex.Dump(tt.file[0].data))
 	}
@@ -330,6 +492,27 @@ func (tt *tester) reopen(format string, args ...any) {
 	if !tt.valid[h] {
 		tt.t.Fatalf("reopen (%d %d): %s: invalid hash %v want %v\n\n%s\n\n%s\n\n%s", len(tt.file[0].data), len(tt.file[1].data), kind, h, tt.valid, debug.Stack(), hex.Dump(tt.mem.mem), hex.Dump(mem.mem))
 	}
+
+	// Check disk size and bytes are valid for this recovered memory image.
+	vd, ok := tt.validDisk[h][mem.diskSize]
+	if !ok {
+		var validSizes []int64
+		for s := range tt.validDisk[h] {
+			validSizes = append(validSizes, s)
+		}
+		tt.t.Fatalf("reopen (%d %d): %s: invalid diskSize %d for hash %s, want one of %v", len(tt.file[0].data), len(tt.file[1].data), kind, mem.diskSize, h, validSizes)
+	}
+
+	if mem.diskSize > 0 {
+		data := make([]byte, mem.diskSize)
+		mem.disk.ReadAt(data, mem.diskOff)
+		for i, b := range data {
+			if !vd[i].has(b) {
+				tt.t.Fatalf("reopen (%d %d): %s: invalid disk byte %#x at offset %d (hash %s, diskSize %d)", len(tt.file[0].data), len(tt.file[1].data), kind, b, i, h, mem.diskSize)
+			}
+		}
+	}
+
 	check(tt.t, mem.Release())
 	check(tt.t, mem.UnsafeUnmap())
 }
