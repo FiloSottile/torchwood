@@ -102,6 +102,23 @@ var (
 	maxPatch = 16 << 20
 )
 
+// SetMaxMem sets the virtual memory size reserved during [Create] and [Open],
+// which is the maximum possible size that a [Mem] can expand to.
+// The default is 16 TB, which is far more than enough for all practical uses
+// while leaving enough headroom that many different [Mem]s can coexist
+// in a 64-bit address space. It should be unnecessary to use SetMaxMem
+// except in tests that create many [Mem]s simultaneously.
+//
+// SetMaxMem returns the old limit. If limit <= 0, SetMaxMem does not modify
+// the limit, so SetMaxMem(0) can be used to read the current limit.
+func SetMaxMem(limit int) int {
+	old := maxMem
+	if limit > 0 {
+		maxMem = limit
+	}
+	return old
+}
+
 var errCorrupt = errors.New("corrupt input file")
 
 // File is the interface needed for on-disk storage.

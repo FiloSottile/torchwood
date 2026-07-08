@@ -5,6 +5,7 @@
 package mpt
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,7 +27,7 @@ type memNode struct {
 	val   Val
 	ihash Hash
 	dirty bool // needs rehashing
-	ubit  byte
+	ubit  int
 	left  *memNode
 	right *memNode
 }
@@ -35,7 +36,7 @@ func (n *memNode) bit() int {
 	if n.left == nil && n.right == nil {
 		return -1
 	}
-	return int(n.ubit)
+	return n.ubit
 }
 
 // NewMemTree returns a new in-memory [Tree].
@@ -137,7 +138,7 @@ func (n *memNode) set(pbit int, key Key, val Val) int {
 	if n.bit() <= pbit {
 		// view n as leaf
 		b := n.key.overlap(key)
-		if b == keyBits {
+		if b == maxKeyBits {
 			n.val = val
 			return -1
 		}
@@ -170,7 +171,7 @@ func setChild(nbit int, child **memNode, key Key, val Val) int {
 		*n = memNode{
 			key:   key,
 			val:   val,
-			ubit:  uint8(b),
+			ubit:  b,
 			dirty: true,
 			left:  left,
 			right: right,
@@ -197,7 +198,7 @@ func (t *memTree) Predict(changes []KeyVal) (Hash, error) {
 	}
 	s, list := t.predict([]node{}, t.root, -1, changes)
 	for _, kv := range list {
-		s = reduce(append(s, node{prefix(kv.Key, 256), hashLeaf(kv.Key, kv.Val)}))
+		s = reduce(append(s, node{prefix(kv.Key, maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
 	}
 	return hashStack(s), nil
 }
@@ -210,7 +211,7 @@ func (t *memTree) predict(s []node, n *memNode, pbit int, list []KeyVal) ([]node
 	nbit := n.bit()
 	bits := nbit
 	if nbit <= pbit {
-		bits = 256
+		bits = maxKeyBits
 	}
 	pkey := prefix(key, bits)
 
@@ -218,12 +219,12 @@ func (t *memTree) predict(s []node, n *memNode, pbit int, list []KeyVal) ([]node
 	for len(list) > 0 && prefix(list[0].Key, bits).compare(pkey) < 0 {
 		k, v := list[0].Key, list[0].Val
 		list = list[1:]
-		s = reduce(append(s, node{prefix(k, 256), hashLeaf(k, v)}))
+		s = reduce(append(s, node{prefix(k, maxKeyBits), hashLeaf(k, v)}))
 	}
 
 	// Stack leaf node, possibly replaced.
-	if bits == 256 {
-		if len(list) > 0 && list[0].Key == key {
+	if bits == maxKeyBits {
+		if len(list) > 0 && bytes.Equal(list[0].Key, key) {
 			val = list[0].Val
 			list = list[1:]
 		}
@@ -262,7 +263,7 @@ func (n *memNode) prove(pbit int, key Key) (val Val, ok bool, proof Proof, err e
 	nbit := n.bit()
 	if nbit <= pbit {
 		// view n as leaf
-		if n.key == key {
+		if bytes.Equal(n.key, key) {
 			return n.val, true, Proof{}, nil
 		}
 		var p Proof
