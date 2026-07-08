@@ -5,6 +5,7 @@
 package mpt
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 )
@@ -190,12 +191,12 @@ func (n *diskNode) set(t *diskTree, pbit int, key Key, val Val) (int, error) {
 	nbit := n.bit()
 	if nbit <= pbit {
 		// view n as leaf
-		nkey, _, err := n.keyVal(t)
+		nkey, err := n.key(t)
 		if err != nil {
 			return 0, err
 		}
 		b := nkey.overlap(key)
-		if b == keyBits {
+		if b == maxKeyBits {
 			if err := n.setVal(t, val); err != nil {
 				return 0, err
 			}
@@ -272,7 +273,7 @@ func (t *diskTree) Predict(changes []KeyVal) (Hash, error) {
 		return Hash{}, err
 	}
 	for _, kv := range list {
-		s = reduce(append(s, node{prefix(kv.Key, 256), hashLeaf(kv.Key, kv.Val)}))
+		s = reduce(append(s, node{prefix(kv.Key, maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
 	}
 	return hashStack(s), nil
 }
@@ -294,7 +295,7 @@ func (t *diskTree) predict(s []node, a addr, pbit int, list []KeyVal) ([]node, [
 	nbit := n.bit()
 	bits := nbit
 	if nbit <= pbit {
-		bits = 256
+		bits = maxKeyBits
 	}
 	pkey := prefix(key, bits)
 
@@ -302,12 +303,12 @@ func (t *diskTree) predict(s []node, a addr, pbit int, list []KeyVal) ([]node, [
 	for len(list) > 0 && prefix(list[0].Key, bits).compare(pkey) < 0 {
 		k, v := list[0].Key, list[0].Val
 		list = list[1:]
-		s = reduce(append(s, node{prefix(k, 256), hashLeaf(k, v)}))
+		s = reduce(append(s, node{prefix(k, maxKeyBits), hashLeaf(k, v)}))
 	}
 
 	// Stack leaf node, possibly replaced.
-	if bits == 256 {
-		if len(list) > 0 && list[0].Key == key {
+	if bits == maxKeyBits {
+		if len(list) > 0 && bytes.Equal(list[0].Key, key) {
 			val = list[0].Val
 			list = list[1:]
 		}
@@ -366,7 +367,7 @@ func (n *diskNode) prove(t *diskTree, pbit int, key Key) (val Val, ok bool, proo
 		if err != nil {
 			return Val{}, false, nil, err
 		}
-		if nkey == key {
+		if bytes.Equal(nkey, key) {
 			return nval, true, Proof{}, nil
 		}
 		var p Proof

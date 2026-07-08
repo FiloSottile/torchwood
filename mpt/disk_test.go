@@ -16,7 +16,17 @@ import (
 	"runtime/debug"
 	"slices"
 	"testing"
+
+	"filippo.io/torchwood/mpt/internal/pmem"
 )
+
+func init() {
+	// On macOS, span.Reserve+UnsafeUnmap takes time linear in MaxMem, about 1-2µs per GB.
+	// The default 16 TB MaxMem implies about 30ms of overhead for every disk tree we create
+	// and destroy. Cut MaxMem to 1GB so that this overhead doesn't dominate our costs.
+	// On an M3 MacBook Pro (2023), this call cuts 'go test' time from 42s to 1s.
+	pmem.SetMaxMem(1 << 30)
+}
 
 // A memFile is an in-memory file with ReadAt, WriteAt, Close, and Sync methods.
 type memFile struct {
@@ -59,18 +69,12 @@ func (f *memFile) Sync() error {
 func memHash(t *diskTree) string {
 	h := sha256.New()
 	h.Write(t.mem)
-	n := 1 + (len(t.mem)-hdrSize)/nodeSize
-	const pmemHdrSize = 16
-	leaf := pmemHdrSize + n*64
 	switch f := t.leaf.(type) {
 	default:
 		panic(fmt.Sprintf("unknown leaf type %T", t.leaf))
 	case *memFile:
-		h.Write(f.data[:leaf])
+		h.Write(f.data)
 	case *testFile:
-		if len(f.data) != leaf {
-			panic(fmt.Sprintf("unexpected leaf size in real tree: %d != %d (t.mem=%d)", len(f.data), leaf, len(t.mem)))
-		}
 		h.Write(f.data)
 	}
 	s := base64.StdEncoding.EncodeToString(h.Sum(nil))
@@ -321,4 +325,115 @@ func check(t *testing.T, err error) {
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+func diskSize(tree Tree) int64 {
+	return tree.(*diskTree).pmem.DiskSize()
+}
+
+func TestSetOverwriteDiskSize(t *testing.T) {
+	key := Key("testkey")
+	val := func(n int, fill byte) Val {
+		v := make(Val, n)
+		for i := range v {
+			v[i] = fill
+		}
+		return v
+	}
+
+	t.Run("same_size", func(t *testing.T) {
+		tree := newDiskTree()
+		defer tree.Close()
+
+		check(t, tree.Set(key, val(100, 'a')))
+		check(t, tree.Set(key, val(200, 'b'))) // grow to establish a 200-byte slot
+		size := diskSize(tree)
+
+		check(t, tree.Set(key, val(200, 'c'))) // same size
+		if got := diskSize(tree); got != size {
+			t.Fatalf("same-size overwrite grew disk: %d -> %d", size, got)
+		}
+	})
+
+	t.Run("shorter", func(t *testing.T) {
+		tree := newDiskTree()
+		defer tree.Close()
+
+		check(t, tree.Set(key, val(200, 'a')))
+		size := diskSize(tree)
+
+		check(t, tree.Set(key, val(100, 'b'))) // shorter
+		if got := diskSize(tree); got != size {
+			t.Fatalf("shorter overwrite grew disk: %d -> %d", size, got)
+		}
+
+		check(t, tree.Set(key, val(1, 'c'))) // much shorter
+		if got := diskSize(tree); got != size {
+			t.Fatalf("much shorter overwrite grew disk: %d -> %d", size, got)
+		}
+	})
+
+	t.Run("longer", func(t *testing.T) {
+		tree := newDiskTree()
+		defer tree.Close()
+
+		check(t, tree.Set(key, val(100, 'a')))
+		size := diskSize(tree)
+
+		check(t, tree.Set(key, val(101, 'b'))) // one byte longer
+		if got := diskSize(tree); got <= size {
+			t.Fatalf("longer overwrite did not grow disk: %d -> %d", size, got)
+		}
+	})
+
+	t.Run("shrink_restore", func(t *testing.T) {
+		tree := newDiskTree()
+		defer tree.Close()
+
+		N := 200
+		check(t, tree.Set(key, val(N, 'a')))
+		size := diskSize(tree)
+
+		check(t, tree.Set(key, val(1, 'b'))) // shrink to 1 byte
+		if got := diskSize(tree); got != size {
+			t.Fatalf("shrink grew disk: %d -> %d", size, got)
+		}
+
+		check(t, tree.Set(key, val(N, 'c'))) // restore to N bytes
+		if got := diskSize(tree); got != size {
+			t.Fatalf("restore to original size grew disk: %d -> %d", size, got)
+		}
+
+		check(t, tree.Set(key, val(N+1, 'd'))) // N+1 should grow
+		if got := diskSize(tree); got <= size {
+			t.Fatalf("N+1 overwrite did not grow disk: %d -> %d", size, got)
+		}
+	})
+
+	t.Run("shrink_restore_multiple", func(t *testing.T) {
+		tree := newDiskTree()
+		defer tree.Close()
+
+		N := 150
+		check(t, tree.Set(key, val(N, 'a')))
+		size := diskSize(tree)
+
+		// Toggle between small and original size repeatedly.
+		for i := range 5 {
+			check(t, tree.Set(key, val(1, byte('b'+i))))
+			if got := diskSize(tree); got != size {
+				t.Fatalf("iteration %d: shrink grew disk: %d -> %d", i, size, got)
+			}
+			check(t, tree.Set(key, val(N, byte('g'+i))))
+			if got := diskSize(tree); got != size {
+				t.Fatalf("iteration %d: restore grew disk: %d -> %d", i, size, got)
+			}
+		}
+
+		// Only N+1 should grow.
+		check(t, tree.Set(key, val(N+1, 'z')))
+		if got := diskSize(tree); got <= size {
+			t.Fatalf("N+1 overwrite did not grow disk: %d -> %d", size, got)
+		}
+	})
 }

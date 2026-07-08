@@ -10,7 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"runtime/debug"
 	"slices"
@@ -114,7 +114,7 @@ func TestAllTrees(t *testing.T) {
 				const B = 3
 				const N = 1 << B
 				k := func(i int) Key {
-					var k Key
+					k := make(Key, 32)
 					if keys == "hi" {
 						k[0] = byte(i) << (8 - B)
 					} else {
@@ -174,7 +174,8 @@ func TestPredictRandom(t *testing.T) {
 				// Build random tree.
 				var init []KeyVal
 				for i := range N {
-					init = append(init, KeyVal{sha(fmt.Sprintf("key-%d-%d", iter, i)), v(i)})
+					s := sha(fmt.Sprintf("key-%d-%d", iter, i))
+					init = append(init, KeyVal{s[:], v(i)})
 				}
 				for _, kv := range init {
 					tt.set(kv.Key, kv.Val)
@@ -182,24 +183,25 @@ func TestPredictRandom(t *testing.T) {
 				tt.tree.Snap(1)
 
 				// Choose random edits, using map to dedup keys.
-				update := make(map[Key]Val)
+				update := make(map[string]Val)
 				for i := range 10 {
 					var k Key
 					if i%2 == 0 {
 						// Edit existing
-						k = init[rand.Intn(N)].Key
+						k = init[rand.N(N)].Key
 					} else {
 						// New key
-						k = sha(fmt.Sprintf("newkey-%d-%d", iter, i))
+						s := sha(fmt.Sprintf("newkey-%d-%d", iter, i))
+						k = s[:]
 					}
-					v := sha(fmt.Sprintf("val-%d-%d", iter, i))
-					update[k] = v
+					s := sha(fmt.Sprintf("val-%d-%d", iter, i))
+					update[string(k)] = s[:]
 				}
 
 				// Sort edits.
 				var edits []KeyVal
-				for key, val := range update {
-					edits = append(edits, KeyVal{key, val})
+				for ks, val := range update {
+					edits = append(edits, KeyVal{Key(ks), val})
 				}
 				slices.SortFunc(edits, KeyVal.Compare)
 
@@ -226,7 +228,7 @@ func TestPredictRandom(t *testing.T) {
 	})
 }
 
-func h(x string) [32]byte {
+func h(x string) []byte {
 	if l, r, ok := strings.Cut(x, "..."); ok && l != "" && r != "" && l[len(l)-1] == r[0] {
 		x = l + strings.Repeat(r[0:1], 64-len(l)-len(r)) + r
 	}
@@ -234,7 +236,7 @@ func h(x string) [32]byte {
 	if err != nil || len(h) != 32 {
 		panic("bad hex: " + x)
 	}
-	return [32]byte(h)
+	return h
 }
 
 func v(i int) Val {
@@ -249,12 +251,14 @@ func enc(list ...any) []byte {
 			panic(fmt.Sprintf("enc %T", item))
 		case string:
 			out = append(out, item...)
+		case []byte:
+			out = append(out, item...)
 		case [32]byte:
 			out = append(out, item[:]...)
 		case Key:
-			out = append(out, item[:]...)
+			out = append(out, item...)
 		case Val:
-			out = append(out, item[:]...)
+			out = append(out, item...)
 		case Hash:
 			out = append(out, item[:]...)
 		}
@@ -343,13 +347,13 @@ func (tt *testTree) get(key Key, val Val, ok bool) {
 	}
 	var vb []byte
 	if o {
-		vb = v[:]
+		vb = []byte(v)
 	}
-	err = Verify(snap, key[:], vb, o, proof)
+	err = Verify(snap, []byte(key), vb, o, proof)
 	if err != nil {
 		tt.t.Fatalf("Verify %v: %v\nSnap: %v\nProof: %x\n\nLog:\n%s", key, err, snap, proof, &tt.log)
 	}
-	if v != val || o != ok {
+	if !bytes.Equal([]byte(v), []byte(val)) || o != ok {
 		tt.t.Fatalf("get %v:\nhave %v, %v\nwant %v, %v\n\nLog:\n%s", key, v, o, val, ok, &tt.log)
 	}
 
@@ -377,7 +381,8 @@ func benchmarkSet(b *testing.B, tree Tree, n, treeSize int) {
 		todo = append(todo, [2]Hash{sha(v(i)), Hash(v(i))})
 	}
 	for i := range treeSize {
-		tree.Set(sha("old", v(i)), v(i))
+		s := sha("old", v(i))
+		tree.Set(s[:], v(i))
 	}
 	tree.Snap(1)
 
@@ -385,7 +390,7 @@ func benchmarkSet(b *testing.B, tree Tree, n, treeSize int) {
 	for b.Loop() {
 		//	tree1 := *tree
 		for _, kv := range todo {
-			tree.Set(Key(kv[0]), Val(kv[1]))
+			tree.Set(kv[0][:], kv[1][:])
 		}
 		tree.Snap(2)
 	}
@@ -408,10 +413,12 @@ func BenchmarkProofIn10M(b *testing.B) {
 
 func benchmarkProof(b *testing.B, tree Tree, treeSize int) {
 	for i := range treeSize {
-		tree.Set(sha("old", v(i)), v(i))
+		s := sha("old", v(i))
+		tree.Set(s[:], v(i))
 	}
 	tree.Snap(1)
-	key := sha("old", v(0))
+	s := sha("old", v(0))
+	key := Key(s[:])
 
 	b.ReportAllocs()
 	for b.Loop() {
@@ -547,4 +554,154 @@ func decodeHex(t *testing.T, file string, lineno int, s string) []byte {
 		t.Fatalf("%s:%d: bad hex %q: %v", file, lineno, s, err)
 	}
 	return b
+}
+
+type treeHashTest struct {
+	line int
+	kvs  []KeyVal
+	hash Hash
+}
+
+func parseTreeHashTests(t *testing.T) []treeHashTest {
+	t.Helper()
+	file := "testdata/treehash.txt"
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var tests []treeHashTest
+	var kvs []KeyVal
+	lines := strings.Split(string(data), "\n")
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		cmd, arg, _ := strings.Cut(line, " ")
+		arg = strings.TrimSpace(arg)
+
+		switch cmd {
+		case "kv":
+			parts := strings.Fields(arg)
+			if len(parts) != 2 {
+				t.Fatalf("%s:%d: kv needs 2 args", file, i+1)
+			}
+			key := decodeHex(t, file, i+1, parts[0])
+			val := decodeHex(t, file, i+1, parts[1])
+			kvs = append(kvs, KeyVal{Key: key, Val: val})
+		case "hash":
+			want := decodeHex(t, file, i+1, arg)
+			if len(want) != 32 {
+				t.Fatalf("%s:%d: hash must be 32 bytes", file, i+1)
+			}
+			tests = append(tests, treeHashTest{
+				line: i + 1,
+				kvs:  slices.Clone(kvs),
+				hash: Hash(want),
+			})
+			kvs = kvs[:0]
+		default:
+			t.Fatalf("%s:%d: unknown directive %q", file, i+1, cmd)
+		}
+	}
+	return tests
+}
+
+func TestTreeHash(t *testing.T) {
+	tests := parseTreeHashTests(t)
+	for _, tc := range tests {
+		kvs := slices.Clone(tc.kvs)
+		slices.SortFunc(kvs, KeyVal.Compare)
+		got := TreeHash(slices.Values(kvs))
+		if got != tc.hash {
+			t.Errorf("testdata/treehash.txt:%d: TreeHash = %x, want %x", tc.line, got, tc.hash)
+		}
+	}
+}
+
+func TestTreeImpls(t *testing.T) {
+	orders := []struct {
+		name string
+		fn   func([]KeyVal) []KeyVal
+	}{
+		{"file_order", func(kvs []KeyVal) []KeyVal {
+			return slices.Clone(kvs)
+		}},
+		{"file_order_reverse", func(kvs []KeyVal) []KeyVal {
+			k := slices.Clone(kvs)
+			slices.Reverse(k)
+			return k
+		}},
+		{"key_compare_order", func(kvs []KeyVal) []KeyVal {
+			k := slices.Clone(kvs)
+			slices.SortFunc(k, KeyVal.Compare)
+			return k
+		}},
+		{"key_compare_order_reverse", func(kvs []KeyVal) []KeyVal {
+			k := slices.Clone(kvs)
+			slices.SortFunc(k, KeyVal.Compare)
+			slices.Reverse(k)
+			return k
+		}},
+		{"shuffled", func(kvs []KeyVal) []KeyVal {
+			k := slices.Clone(kvs)
+			rand.Shuffle(len(k), func(i, j int) { k[i], k[j] = k[j], k[i] })
+			return k
+		}},
+	}
+
+	tests := parseTreeHashTests(t)
+	testImpls(t, func(t *testing.T, newTree func(*testing.T) *testTree) {
+		for _, tc := range tests {
+			t.Run(fmt.Sprintf("line%d", tc.line), func(t *testing.T) {
+				for _, ord := range orders {
+					t.Run(ord.name, func(t *testing.T) {
+						t.Parallel()
+						kvs := ord.fn(tc.kvs)
+						for n := 0; n <= len(kvs); n += 1 + len(kvs)/10 {
+							func() {
+								tt := newTree(t)
+								defer tt.tree.Close()
+
+								for _, kv := range kvs[:n] {
+									tt.set(kv.Key, kv.Val)
+								}
+								e1 := int64(1)
+								if n == 0 {
+									e1 = 0
+								}
+								if _, err := tt.tree.Snap(e1); err != nil {
+									t.Fatalf("Snap(%d): %v", e1, err)
+								}
+
+								rem := slices.Clone(kvs[n:])
+								slices.SortFunc(rem, KeyVal.Compare)
+								predictedHash, err := tt.tree.Predict(rem)
+								if err != nil {
+									t.Fatalf("Predict: %v", err)
+								}
+
+								for _, kv := range kvs[n:] {
+									tt.set(kv.Key, kv.Val)
+								}
+								e2 := int64(2)
+								if len(tc.kvs) == 0 {
+									e2 = 0
+								}
+								tt.snap(e2, tc.hash)
+								if predictedHash != tc.hash {
+									t.Errorf("n=%d Predict = %v, want %v", n, predictedHash, tc.hash)
+								}
+								for _, kv := range tc.kvs {
+									tt.get(kv.Key, kv.Val, true)
+								}
+							}()
+						}
+					})
+				}
+			})
+		}
+	})
 }

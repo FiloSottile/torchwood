@@ -244,13 +244,19 @@ type Tree interface {
 var ErrModifiedTree = errors.New("tree modified without snapshot")
 
 // ErrInvalidPredict indicates that Predict was passed a set of
-// changes that was not sorted by increasing key or contained
-// duplicates.
+// changes that was not sorted by Key.Compare, contained
+// duplicates, or had a key or value that was too large
+// (more than [MaxKeyLen] or [MaxValLen] bytes).
 var ErrInvalidPredict = errors.New("invalid predicted changes")
 
 func checkChanges(changes []KeyVal) error {
+	for _, c := range changes {
+		if len(c.Key) > MaxKeyLen || len(c.Val) > MaxValLen {
+			return ErrInvalidPredict
+		}
+	}
 	for i := 0; i < len(changes)-1; i++ {
-		if bytes.Compare(changes[i].Key[:], changes[i+1].Key[:]) >= 0 {
+		if changes[i].Key.Compare(changes[i+1].Key) >= 0 {
 			return ErrInvalidPredict
 		}
 	}
@@ -259,10 +265,34 @@ func checkChanges(changes []KeyVal) error {
 
 // A Key is a key used by a Tree.
 // It is usually a cryptographic hash of the actual key data.
-type Key [32]byte
+// A Key can be at most MaxKeyLen bytes.
+type Key []byte
 
-// keyBits is the number of bits in a Key.
-const keyBits = len(Key{}) * 8
+const (
+	// MaxKeyLen is the maximum length of a Key
+	// that can be stored in a Tree.
+	// Attempts to use larger keys return [ErrKeySize].
+	MaxKeyLen = 1024
+
+	// MaxValLen is the maximum length of a Val
+	// that can be stored in a Tree.
+	// Attempts to use larger values return [ErrValSize].
+	MaxValLen = 1024
+)
+
+// maxKeyBits is the longest possible key length we need to consider,
+// including padding. The +1 is because a key of MaxKeyLen bytes
+// ending in 0x00 and its MaxKeyLen-1-byte prefix only differ when
+// you consider the padding beyond MaxKeyLen.
+const maxKeyBits = MaxKeyLen*8 + 1
+
+var (
+	// ErrKeySize reports use of a key larger than [MaxKeyLen] bytes.
+	ErrKeySize = errors.New("key too large")
+
+	// ErrValSize reports use of a value larger than [MaxValLen] bytes.
+	ErrValSize = errors.New("val too large")
+)
 
 func (k Key) String() string {
 	return hex.EncodeToString(k[:])
@@ -270,36 +300,83 @@ func (k Key) String() string {
 
 // bit returns the n'th bit of the key.
 func (k Key) bit(n int) int {
-	return (int(k[n>>3]) >> (7 - n&7)) & 1
+	return bit(k, n)
+}
+
+// cmp compares p and q (using key + infinite padding 00 FF FF FF...)
+// and returns the comparison result c (-1, 0, +1) and the number of
+// leading bits p and q have in common (overlap).
+func (p Key) cmp(q Key) (c, overlap int) {
+	short, long, fix := p, q, +1
+	if len(short) > len(long) {
+		short, long, fix = long, short, -fix
+	}
+	for i := range short {
+		pf := short[i]
+		qf := long[i]
+		if pf != qf {
+			overlap := i*8 + bits.LeadingZeros8(pf^qf)
+			c := -1
+			if pf > qf {
+				c = +1
+			}
+			return c * fix, overlap
+		}
+	}
+	if len(short) == len(long) {
+		return 0, maxKeyBits
+	}
+	// short is a prefix of long.
+	// short's padding starts with 0x00 at len(short), followed by 0xFF, 0xFF...
+	// Compare short's padding byte 0x00 with long[len(short)].
+	b0 := long[len(short)]
+	if b0 != 0x00 {
+		// 0x00 vs b0 (where b0 > 0x00 since long[len(short)] != 0)
+		overlap := len(short)*8 + bits.LeadingZeros8(b0)
+		c := -1 // short (0x00) < long (b0)
+		return c * fix, overlap
+	}
+	// Both have 0x00 at position len(short).
+	// Padding for short continues as FF FF FF...
+	for i := len(short) + 1; i < len(long); i++ {
+		if long[i] != 0xFF {
+			// 0xFF vs long[i]
+			overlap := i*8 + bits.LeadingZeros8(0xFF^long[i])
+			c := +1 // short (0xFF) > long (long[i] < 0xFF)
+			return c * fix, overlap
+		}
+	}
+	// long matches short's padding through all of long's bytes.
+	// Now compare padding at len(long):
+	// short has 0xFF (continued padding).
+	// long has 0x00 (start of long's padding).
+	// So short (0xFF) > long (0x00).
+	c = +1
+	return c * fix, len(long) * 8
 }
 
 // overlap returns the number of leading bits p and q have in common.
 func (p Key) overlap(q Key) int {
-	for i := range p {
-		pf := p[i]
-		qf := q[i]
-		if pf != qf {
-			return i*8 + bits.LeadingZeros8(pf^qf)
-
-		}
-	}
-	return 256
+	_, overlap := p.cmp(q)
+	return overlap
 }
 
-// Compare returns the result of comparing two keys.
-func (k Key) Compare(q Key) int {
-	return bytes.Compare(k[:], q[:])
+// Compare returns the result of comparing two keys,
+// using the order in which the keys will appear in a [Tree].
+// Compare often agrees with [bytes.Compare].
+// In particular it is the same as [bytes.Compare] when
+// keys have fixed length, when no key can be a prefix of another,
+// or when keys do not contain NUL bytes.
+// In the general case, however, Compare returns
+// bytes.Compare(k+pad, k2+pad) where pad is the infinite byte sequence “00 FF FF FF...”.
+func (p Key) Compare(q Key) int {
+	c, _ := p.cmp(q)
+	return c
 }
-
-// Value is the old name for Val.
-// Run “go fix” to update client code to use Val instead of Value.
-//
-//go:fix inline
-type Value = Val
 
 // A Val is a value stored in a Tree.
 // It is usually a cryptographic hash of the actual value data.
-type Val [32]byte
+type Val []byte
 
 func (v Val) String() string {
 	return hex.EncodeToString(v[:])
@@ -319,15 +396,19 @@ func (kv KeyVal) Compare(other KeyVal) int {
 
 // A keyPrefix is a prefix of a key, identifying a specific node.
 type keyPrefix struct {
-	// bits is the prefix length in bits (0..256, inclusive).
+	// bits is the prefix length in bits (0..maxKeyBits, inclusive).
 	bits int
 
-	// full is the key prefix bytes, zero-padded on the right.
+	// full is the key whose prefix is being taken.
 	full Key
 }
 
 func (p keyPrefix) String() string {
-	return fmt.Sprintf("%x/%d", p.full[:(p.bits+7)/8], p.bits)
+	n := (p.bits + 7) / 8
+	if n > len(p.full) {
+		n = len(p.full)
+	}
+	return fmt.Sprintf("%x/%d", p.full[:n], p.bits)
 }
 
 // overlap returns the number of leading bits p and q have in common.
@@ -337,20 +418,22 @@ func (p keyPrefix) overlap(q keyPrefix) int {
 
 func (p keyPrefix) truncate(bits int) keyPrefix {
 	p.bits = bits
-	clear(p.full[(bits+7)/8:])
-	if n := bits & 7; n != 0 {
-		p.full[bits/8] &= 0xFF << (8 - n)
-	}
 	return p
 }
 
 func (p keyPrefix) compare(q keyPrefix) int {
-	return bytes.Compare(p.full[:], q.full[:])
+	if p.bits != q.bits {
+		panic(fmt.Sprintf("keyPrefix.compare mismatched bits: %d != %d", p.bits, q.bits))
+	}
+	c, overlap := p.full.cmp(q.full)
+	if overlap >= p.bits {
+		return 0
+	}
+	return c
 }
 
 func prefix(key Key, bits int) keyPrefix {
-	p := keyPrefix{bits: bits, full: key}
-	return p.truncate(bits)
+	return keyPrefix{bits: bits, full: key}
 }
 
 // A node represents the metadata for a single node.
@@ -397,7 +480,7 @@ func (h Hash) String() string {
 func TreeHash(seq iter.Seq[KeyVal]) Hash {
 	var s []node
 	for kv := range seq {
-		s = reduce(append(s, node{prefix(kv.Key, keyBits), hashLeaf(kv.Key, kv.Val)}))
+		s = reduce(append(s, node{prefix(kv.Key, maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
 	}
 	return hashStack(s)
 }
@@ -435,7 +518,7 @@ func Verify(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
 	var h Hash
 	if ok {
 		pkey = key
-		h = hashLeafVar(key, val)
+		h = hashLeaf(key, val)
 	} else {
 		var pval []byte
 		var ok bool
@@ -450,7 +533,7 @@ func Verify(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
 		if bytes.Equal(pkey, key) {
 			return ErrInvalidProof
 		}
-		h = hashLeafVar(pkey, pval)
+		h = hashLeaf(pkey, pval)
 	}
 
 	b := 1 << 30
@@ -504,11 +587,17 @@ func bit(b []byte, n int) int {
 	return 1
 }
 
-// hashLeafVar returns the hash of a leaf with a given key and value,
+// emptyTreeHash returns the parent hash for a root no child nodes.
+func emptyTreeHash() Hash {
+	h := sha256.Sum256(nil)
+	return h
+}
+
+// hashLeaf returns the hash of a leaf with a given key and value,
 // where key and val are variable-length byte slices.
 // The hash is H(0 || len(key) || key || len(val) || val),
 // where the lengths are varint-encoded.
-func hashLeafVar(key, val []byte) Hash {
+func hashLeaf(key Key, val Val) Hash {
 	h := sha256.New()
 	h.Write([]byte{0})
 	var buf [binary.MaxVarintLen64]byte
@@ -521,34 +610,12 @@ func hashLeafVar(key, val []byte) Hash {
 	return Hash(h.Sum(nil))
 }
 
-// emptyTreeHash returns the parent hash for a root no child nodes.
-func emptyTreeHash() Hash {
-	h := sha256.Sum256(nil)
-	return h
-}
-
-// hashLeaf returns the hash of a leaf with a given key and value.
-// The hash is H(0 || len(key) || key || len(val) || val),
-// where the lengths are varint-encoded.
-func hashLeaf(key Key, val Val) Hash {
-	// 0 tag + varint(32) + 32 + varint(32) + 32 = 1+1+32+1+32 = 67
-	var buf [67]byte
-	buf[0] = 0
-	n := 1
-	n += binary.PutUvarint(buf[n:], uint64(len(key)))
-	n += copy(buf[n:], key[:])
-	n += binary.PutUvarint(buf[n:], uint64(len(val)))
-	n += copy(buf[n:], val[:])
-	return sha256.Sum256(buf[:n])
-}
-
 // hashInner returns the hash of an inner node
 // with the given bit position and left and right child hashes.
 // The hash is H(1 || bit || left-hash || right-hash),
 // where the bit is varint-encoded.
 func hashInner(b int, left, right Hash) Hash {
-	// 1 tag + varint(bit) + 32 + 32; varint(bit) ≤ 2 bytes for bit ≤ 255
-	var buf [67]byte
+	var buf [1 + binary.MaxVarintLen64 + 32 + 32]byte
 	buf[0] = 1
 	n := 1
 	n += binary.PutUvarint(buf[n:], uint64(b))
