@@ -4,7 +4,10 @@
 
 package mpt
 
-import "fmt"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 // hash returns the hash for the given tree node.
 // pbit is the parent bit depth, controlling whether n is viewed as a leaf.
@@ -335,41 +338,43 @@ func (t *diskTree) predict(s []node, a addr, pbit int, list []KeyVal) ([]node, [
 }
 
 // Prove returns a proof of the presence or absence of key in t.
-func (t *diskTree) Prove(key Key) (Proof, error) {
+func (t *diskTree) Prove(key Key) (val Val, ok bool, proof Proof, err error) {
 	t.mmu.RLock()
 	defer t.mmu.RUnlock()
 
 	if t.err != nil {
-		return nil, t.err
+		return Val{}, false, nil, t.err
 	}
 	if t.hdr().dirty() {
-		return nil, ErrModifiedTree
+		return Val{}, false, nil, ErrModifiedTree
 	}
 	root, err := t.node(t.hdr().root())
 	if err != nil {
-		return nil, err
+		return Val{}, false, nil, err
 	}
 	if root == nil {
-		return Proof(proofEmpty), nil
+		return Val{}, false, Proof{}, nil
 	}
 	return root.prove(t, -1, key)
 }
 
-func (n *diskNode) prove(t *diskTree, pbit int, key Key) (Proof, error) {
+func (n *diskNode) prove(t *diskTree, pbit int, key Key) (val Val, ok bool, proof Proof, err error) {
 	nbit := n.bit()
 	if nbit <= pbit {
 		// view n as leaf
 		nkey, nval, err := n.keyVal(t)
 		if err != nil {
-			return nil, err
+			return Val{}, false, nil, err
+		}
+		if nkey == key {
+			return nval, true, Proof{}, nil
 		}
 		var p Proof
-		if nkey == key {
-			p = Proof(proofConfirm)
-		} else {
-			p = append(Proof(proofDeny), nkey[:]...)
-		}
-		return append(p, nval[:]...), nil
+		p = binary.AppendUvarint(p, uint64(len(nkey)))
+		p = append(p, nkey[:]...)
+		p = binary.AppendUvarint(p, uint64(len(nval)))
+		p = append(p, nval[:]...)
+		return Val{}, false, p, nil
 	}
 
 	childAddr, sibAddr := n.left(), n.right()
@@ -378,22 +383,24 @@ func (n *diskNode) prove(t *diskTree, pbit int, key Key) (Proof, error) {
 	}
 	child, err := t.node(childAddr)
 	if err != nil {
-		return nil, err
+		return Val{}, false, nil, err
 	}
 	sib, err := t.node(sibAddr)
 	if err != nil {
-		return nil, err
+		return Val{}, false, nil, err
 	}
 	sibHash, err := sib.hash(t, nbit)
 	if err != nil {
-		return nil, err
+		return Val{}, false, nil, err
 	}
 
-	p, err := child.prove(t, nbit, key)
+	val, ok, proof, err = child.prove(t, nbit, key)
 	if err != nil {
-		return nil, err
+		return
 	}
-	return append(append(p, byte(nbit)), sibHash[:]...), nil
+	proof = binary.AppendUvarint(proof, uint64(nbit))
+	proof = append(proof, sibHash[:]...)
+	return
 }
 
 func (t *diskTree) check() {

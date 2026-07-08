@@ -8,7 +8,7 @@ Analogous to a [transparent log](https://research.swtch.com/tlog),
 an MPT can cryptographically prove that a given key-value pair exists
 (or that a key does not exist) in a given tree root.
 By recording the sequence of tree roots in a transparent log,
-a server can publish an record of the history of a key-value database,
+a server can publish a record of the history of a key-value database,
 in such a way that auditors can check that the database was correct
 at all times, and clients can be sure the responses they received
 came from the recorded database history.
@@ -67,80 +67,16 @@ After describing the fully in-memory version, we describe the hybrid version.
 
 ## Merkle Patricia Tree Overview {#mpt}
 
-An MPT starts with the concept of a binary tree of depth 256, where the key-value
-pairs are stored in the leaves at depth 256, and a lookup proceeds by walking
-left or right according to each of the 256 key bits. The root node represents
-the empty key prefix, its children represent key bit prefixes 0 and 1, their
-children represent key bit prefixes 00, 01, 10, 11, and so on: at depth d,
-the nodes represent key prefixes of d bits.
-The original Key Transparency system at Google used exactly this data structure,
-a [Merkle-hashed binary radix tree](https://github.com/google/keytransparency/blob/master/docs/overview.md).
-Since then, the transparency community has realized that it works better
- to apply Merkle hashing to a Patricia tree,
-which adds three optimizations to the binary radix tree.
+See the doc comment at the top of tree.go for details about the MPT data structure and proofs.
 
-First, the tree is “path-compressed,” by removing inner nodes with a single child:
-a node that would have pointed at a single-child node is replaced by its child,
-recursively. Every node is therefore either a leaf or an inner node with two children.
-The path compression ensures that there are exactly _N_ inner nodes for a tree with _N_+1 leaf nodes.
-
-Second, unlike in a normal binary tree, an inner node stores only the bit position
-that determines whether a lookup should proceed to the left or right child.
-A lookup walks inner nodes down to some leaf, checking one bit at each step.
-Only upon reaching the leaf does it do a full key comparison.
-If it takes _O_(_K_) time to compare two keys, a normal binary tree would
-take _O_(_K_ log _N_) time for a walk; this optimization
-cuts the time to _O_(_K_ + log _N_).
-Furthermore, inner nodes need not store associated keys,
-cutting the number of stored keys by a factor of two.
-
-Third, nodes are “joined” by merging one inner node and one leaf node into
-a single stored node.
-(After joining _N_ inner nodes to _N_ leaf nodes, that leaves one “leaf-only”
-node not paired to an inner node,
-but the node is still stored using the joined representation.)
-Whether a stored node represents an inner node or leaf node depends
-on how it is reached
-while walking the tree.
-This trick is not essential, but it simplifies storage management
-to have only one type of stored node.
-
-The path-compression optimization implies that an inner node for key prefix _p_ exists
-if and only if the tree contains at least one key with prefix _p_0 and at least one key with prefix _p_1.
-That is, the specific inner nodes that exist in a Patricia depend only on which
-keys are present in the tree, not on their insertion order.
-This implies that we can batch or otherwise reorder insertions of distinct keys
-without affecting the final tree structure.
-
-For more about standard Patricia trees, see TODO REFERENCE.
-
-Cominbing the Merkle and Patricia pieces, a Merkle Patricia Tree provides the following operations:
+A Merkle Patricia Tree provides the following operations:
 
  - Set(key, val): add a new key-value pair to the map.
- - Snap(version): set the tree's version and return the tree root's key prefix and hash.
- - Prove(key): return a proof of the result of looking up a given key in the current snapshot. A separate library function `Verify` verifies a proof and returns the lookup result (whether the key was found and, if so, its associated value).
+ - Snap(version): set the tree's version and return the tree root's hash.
+ - Prove(key): return a lookup result (a value and whether the key was found), along with proof of the result.
+   A separate library function `Verify` verifies the result using the proof.
  - Sync(): flush recent changes to disk.
-
-The recursive hash of an MPT is defined as follows:
-
- - The hash of a leaf node is the hash of its key and value.
- - The hash of an inner node is the hash of its bit position and its left and right children's hashes.
-
-A proof confirming that a key-value pair exists in an MPT with a given recursive hash
-is the value followed by the bit position and sibling hash for every inner node along the path
-back to the root.
-The key-value pair can be hashed to obtain the hash of the leaf node,
-and then the running hash can be hashed with the parent's bit position
-and sibling hash to obtain the hash of the next inner node toward the root.
-(Whether the running hash is the left or right child is determined by checking
-the specified bit of the key.)
-Recomputing the root's actual hash proves the lookup.
-
-A proof denying that a target key exists in an MPT is almost identical.
-It consists of the “other key” whose leaf would be found by looking up the key in the tree,
-followed by the proof that that other key is in the tree.
-The verification checks that the other key's proof is valid and also that
-the target key and other key agree at every relevant bit position.
+ - Predict(keyvals): return the snapshot hash that would result from adding all the keyvals to the map.
 
 An in-memory MPT implementation is in [mem.go](mem.go).
 It was useful to write and debug that version before adding the
@@ -150,112 +86,9 @@ that version first.
 It may also be useful read and understand that implementation
 before proceeding to the disk implementation.
 
-## Encoding Details {#encoding}
-
-Any MPT implementation must define the exact encodings it uses.
-The encodings used by this package are as follows.
-
-### Tree Hashes
-
-An empty tree is a special case that is otherwise independent
-of the tree hash definition. In this implementation,
-the hash of an empty tree is SHA256(_e_), the hash of the empty string (e3b0c442...7852b855).
-
-The hash of a leaf node is the hash of the concatenation of the key and value
-(both fixed-size 32-byte sequences).
-
-The hash of an inner node at bit position _b_ with left and right child hashes _left_ and _right_
-is SHA256(_left_ || _right_ || _b_) where _left_ and _right_ are 32-byte values and _b_ is a one-byte value.
-
-### Proofs
-
-Proofs are variable length strings beginning with the 8-byte sequence `mptproof`.
-
-In Go the verifier's signature is:
-
-	func Verify(snap Snapshot, key Key, proof Proof) (val Val, ok bool, err error)
-
-The verifier is given a tree hash (called a snapshot), a specific key, and a proof,
-and it returns three results: (1) the value associated with the key,
-if the proof proved the existence of the key in the tree,
-(2) whether the proved result confirms or denies the existence of the key,
-and (3) an error if the proof was invalid or did not match the tree hash.
-
-A proof of the empty tree is `mptproof` followed by a 0x00 byte.
-It only applies when the tree hash is the empty tree hash,
-and it disproves the existence of all possible keys.
-
-A proof confirming the existence of a key starts with `mptproof` followed by a 0x01 byte
-and then a 32-byte value _v_.
-The hash of the key's leaf node can be recomputed as _h_ = SHA256(_key_ || _v_).
-If the tree is a single node, that is the entire proof: the verifier must check that
-_h_ = _snap_.
-If the tree contains more than one node, the proof continues with
-one or more descriptions of sibling nodes along the path back to the tree root.
-Each sibling node is encoded as 33 bytes: a one-byte bit position _b_
-followed by a 32-byte sibling hash _sib_.
-The verifier must check whether the _b_'th bit of _key_ is 0 or 1
-and then update the running tree hash accordingly:
-
-   - _h_ = SHA256(_h_ || _sib_ || _b_) if bit _b_ of _key_ is 0, or
-   - _h_ = SHA256(_sib_ || _h_ || _b_) if bit _b_ of _key_ is 1.
-
-Then, as before, the recomputed tree hash _h_ can be
-compared against the actual tree hash.
-
-A proof denying the existence of a key starts with `mptproof` followed by a 0x02 byte
-and then a 32-byte key _k_ and 32-byte value _v_,
-describing a leaf node with hash _h_ = SHA256(_k_ || _v_).
-If the tree is a single node, that is the entire proof: the verifier
-must check that _h_ = _snap_ and that _k_ ≠ _key_.
-Otherwise the proof format contains one or more siblings
-encoded exactly as in the the existence proofs.
-Verification also proceeds as in the existence proofs,
-checking along the way that _k_ and _key_ agree on every bit _b_.
-(Otherwise the proof would not describe the path taken
-to walk through the tree in search of _key_.)
-At the end, the verifier must check that _h_ = _snap_ and that _k_ ≠ _key_.
-
-The worst case length of an existence proof is 8+1+32+33*256 = 8489 bytes,
-although random keys will never produce a path of length 256.
-
-The worst case length of a non-existence proof is 8+1+64+33*255 = 8488 bytes.
-A non-existence proof can only have 255 siblings because otherwise the proof
-would describe a key _k_ that agrees with _key_ at all 256 bit positions,
-but then _k_ ≠ _key_ could not be true.
-Again, random keys will never produce a path length of 256.
-
-Note: This encoding is considerably more compact than some others.
-For example, the Rust akd crate's [MembershipProof](https://docs.rs/akd/0.12.0/akd/struct.MembershipProof.html) is:
-
-	pub struct MembershipProof {
-	    pub label: NodeLabel,
-	    pub hash_val: AzksValue,
-	    pub sibling_proofs: Vec<SiblingProof>,
-	}
-
-[NodeLabel](https://docs.rs/akd/0.12.0/akd/struct.NodeLabel.html) is a key plus a bit length, 32+4 = 36 bytes. \
-[AzksValue](https://docs.rs/akd/0.12.0/akd/struct.AzksValue.html) is 32 bytes. \
-[SiblingProof](https://docs.rs/akd/0.12.0/akd/struct.SiblingProof.html) is:
-
-	pub struct SiblingProof {
-	    pub label: NodeLabel,
-	    pub siblings: [AzksElement; 1],
-	    pub direction: Direction,
-	}
-
-[AzksElement](https://docs.rs/akd/0.12.0/akd/struct.AzksElement.html) is a NodeLabel and AzksValue, 64 bytes. \
-[Direction](https://docs.rs/akd/0.12.0/akd/enum.Direction.html) is a single byte.
-
-So SiblingProof is 36+64+1 = 101 bytes, and the overall worst case MembershipProof, if there are 256 siblings,
-is 36+32+101*256 = 25,924 bytes.
-The largest contributor to the difference is that the siblings include two node labels
-when zero node labels suffice.
-The result is a factor of three in the size of the proofs generated (and sent over the network).
-
 ## Tree Algorithms
 
-There are two potentially important computations MPT hashes
+There are two potentially important computations on MPT hashes
 that can be done without creating an explicit tree representation.
 
 ### Whole Tree Hash
