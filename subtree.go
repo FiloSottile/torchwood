@@ -1,6 +1,7 @@
 package torchwood
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"math/bits"
 
@@ -12,7 +13,7 @@ import (
 // where the subtree has start index 0. A [tlog.RecordProof] is a special case
 // of a SubtreeProof where the subtree has size 1.
 //
-// draft-ietf-plants-merkle-tree-certs-04 calls this a "Subtree Consistency
+// draft-ietf-plants-merkle-tree-certs calls this a "Subtree Consistency
 // Proof".
 type SubtreeProof []tlog.Hash
 
@@ -21,6 +22,10 @@ type SubtreeProof []tlog.Hash
 func ProveSubtree(t, start, end int64, r tlog.HashReader) (SubtreeProof, error) {
 	if t < 0 || t > maxN || end > t || !ValidSubtree(start, end) {
 		return nil, fmt.Errorf("tlog: invalid inputs in ProveSubtree")
+	}
+	if start == end {
+		// The proof for an empty subtree is empty.
+		return SubtreeProof{}, nil
 	}
 	indexes := subtreeProofIndex(0, t, start, end, true, nil)
 	if len(indexes) == 0 {
@@ -44,7 +49,7 @@ func ProveSubtree(t, start, end int64, r tlog.HashReader) (SubtreeProof, error) 
 // subtreeProofIndex builds the list of indexes needed to construct the proof
 // that the subtree [start, end) is contained in the node with leaves [lo, hi).
 // It appends those indexes to need and returns the result. See
-// draft-ietf-plants-merkle-tree-certs-04, Section 4.4. b reports whether the
+// draft-ietf-plants-merkle-tree-certs, Section 4.4. b reports whether the
 // verifier already knows the hash of the subtree portion in [lo, hi); it starts
 // true and becomes false past the first straddled node.
 func subtreeProofIndex(lo, hi, start, end int64, b bool, need []int64) []int64 {
@@ -115,6 +120,14 @@ func CheckSubtree(p SubtreeProof, t int64, th tlog.Hash, start, end int64, sh tl
 	if t < 0 || t > maxN || end > t || !ValidSubtree(start, end) {
 		return fmt.Errorf("tlog: invalid inputs in CheckSubtree")
 	}
+	if start == end {
+		// An empty subtree is contained in every tree, so th is not checked:
+		// the proof must be empty and sh must be the hash of the empty tree.
+		if len(p) != 0 || sh != emptyHash {
+			return errProofFailed
+		}
+		return nil
+	}
 	sh2, th2, err := runSubtreeProof(p, 0, t, start, end, true, sh)
 	if err != nil {
 		return err
@@ -179,7 +192,7 @@ func runSubtreeProof(p SubtreeProof, lo, hi, start, end int64, b bool, sh tlog.H
 // contains a particular record. A [tlog.RecordProof] is a special case of a
 // RecordInSubtreeProof where the subtree has start index 0.
 //
-// draft-ietf-plants-merkle-tree-certs-04 calls this a "Subtree Inclusion Proof".
+// draft-ietf-plants-merkle-tree-certs calls this a "Subtree Inclusion Proof".
 type RecordInSubtreeProof []tlog.Hash
 
 // ProveRecordInSubtree returns the proof that the subtree [start, end) contains
@@ -224,15 +237,19 @@ func CheckRecordInSubtree(p RecordInSubtreeProof, start, end int64, sh tlog.Hash
 }
 
 // SubtreeHash computes the hash for the subtree [start, end) using the
-// HashReader to obtain previously stored hashes. SubtreeHash makes a single
-// call to ReadHash requesting at most 1 + log₂(end - start) hashes.
+// HashReader to obtain previously stored hashes. SubtreeHash makes at most a
+// single call to ReadHash requesting at most 1 + log₂(end - start) hashes.
 //
 // A [tlog.TreeHash] is a special case of a SubtreeHash where start is 0.
+// The hash of an empty subtree is the hash of the empty string.
 //
-// See draft-ietf-plants-merkle-tree-certs-04, Section 4.
+// See draft-ietf-plants-merkle-tree-certs, Section 4.
 func SubtreeHash(start, end int64, r tlog.HashReader) (tlog.Hash, error) {
 	if !ValidSubtree(start, end) {
 		return tlog.Hash{}, fmt.Errorf("tlog: invalid inputs in SubtreeHash")
+	}
+	if start == end {
+		return emptyHash, nil
 	}
 	indexes := subTreeIndex(start, end, nil)
 	hashes, err := r.ReadHashes(indexes)
@@ -249,31 +266,38 @@ func SubtreeHash(start, end int64, r tlog.HashReader) (tlog.Hash, error) {
 	return hash, nil
 }
 
-// ValidSubtree reports whether [start, end) is a valid subtree.
+// ValidSubtree reports whether [start, end) is a valid subtree. Note that
+// empty subtrees [x, x) are valid.
 //
-// See draft-ietf-plants-merkle-tree-certs-04, Section 4.
+// See draft-ietf-plants-merkle-tree-certs, Section 4.
 func ValidSubtree(start, end int64) bool {
-	if start < 0 || end <= start || end-start > maxN {
+	if start < 0 || end < start || end-start > maxN {
 		return false
 	}
-	return start&(bitCeil(end-start)-1) == 0
+	return start == end || start&(bitCeil(end-start)-1) == 0
 }
+
+// emptyHash is the hash of the empty tree and of empty subtrees, per
+// RFC 6962, Section 2.1. It is the hash of the empty string.
+var emptyHash = tlog.Hash(sha256.Sum256(nil))
 
 // CoverInterval returns leftStart and mid for the two subtrees [leftStart, mid)
 // and [mid, end) that cover the interval [start, end) as efficiently as
 // possible.
 //
 // The subtrees are adjacent and the second ends at end, but the first may begin
-// before start. See draft-ietf-plants-merkle-tree-certs-04, Section 4.5.
+// before start. If the interval has size zero or one, the first subtree is the
+// interval itself and the second is empty. If [start, end) is a subtree of size
+// larger than one, the two subtrees are its children. See
+// draft-ietf-plants-merkle-tree-certs, Section 4.5.
 //
-// It is an error if start < 0, end <= start, or [start, end) is already a
-// subtree.
+// It is an error if start < 0 or end < start.
 func CoverInterval(start, end int64) (leftStart, mid int64, err error) {
-	if start < 0 || end <= start {
+	if start < 0 || end < start {
 		return 0, 0, fmt.Errorf("tlog: invalid interval in CoverInterval")
 	}
-	if ValidSubtree(start, end) {
-		return 0, 0, fmt.Errorf("tlog: interval is already a subtree in CoverInterval")
+	if end-start <= 1 {
+		return start, end, nil
 	}
 	last := end - 1
 	split := bits.Len64(uint64(start^last)) - 1

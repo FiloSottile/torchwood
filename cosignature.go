@@ -156,6 +156,9 @@ func subtreeCosignedMessage(name string, t uint64, origin string, start, end int
 	})
 	b.AddUint64(uint64(start))
 	b.AddUint64(uint64(end))
+	if start == end && hash != emptyHash {
+		return nil, errors.New("the hash of an empty subtree must be the hash of the empty string")
+	}
 	b.AddBytes(hash[:])
 	return b.Bytes()
 }

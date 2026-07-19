@@ -134,6 +134,37 @@ func TestSubtreeRoundtrip(t *testing.T) {
 	if !v.VerifySubtree("example.com/log", 0, 123, th, []byte(checkpointSig)) {
 		t.Fatal("checkpoint cosignature did not verify as subtree cosignature")
 	}
+
+	// Empty subtrees can be signed and verified, but only with the hash of the
+	// empty string.
+	empty, err := tlog.TreeHash(0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptySig, err := s.SignSubtree("example.com/log", 5, 5, empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.VerifySubtree("example.com/log", 5, 5, empty, emptySig) {
+		t.Fatal("empty subtree signature did not verify")
+	}
+	if _, err := s.SignSubtree("example.com/log", 5, 5, th); err == nil {
+		t.Fatal("expected error signing empty subtree with wrong hash")
+	}
+	if v.VerifySubtree("example.com/log", 5, 5, th, emptySig) {
+		t.Fatal("expected failure verifying empty subtree with wrong hash")
+	}
+
+	// A checkpoint for an empty tree can be cosigned, but only with the hash
+	// of the empty string.
+	emptyCheckpoint := "example.com/log\n0\n" + base64.StdEncoding.EncodeToString(empty[:]) + "\n"
+	if _, err := note.Sign(&note.Note{Text: emptyCheckpoint}, s); err != nil {
+		t.Fatal(err)
+	}
+	badEmptyCheckpoint := "example.com/log\n0\n" + base64.StdEncoding.EncodeToString(th[:]) + "\n"
+	if _, err := note.Sign(&note.Note{Text: badEmptyCheckpoint}, s); err == nil {
+		t.Fatal("expected error signing empty-tree checkpoint with wrong hash")
+	}
 }
 
 func testSignerRoundtrip(t *testing.T, k crypto.Signer, extensions bool) {
