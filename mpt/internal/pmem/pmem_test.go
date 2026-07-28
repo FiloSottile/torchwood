@@ -101,7 +101,7 @@ func testRecovery(t *testing.T) {
 	check(t, mem.UnsafeUnmap())
 }
 
-func TestOpenPopulatesID(t *testing.T) {
+func TestWriteAfterOpen(t *testing.T) {
 	tt := &tester{t: t}
 	for i := range tt.file {
 		tt.file[i].tester = tt
@@ -116,19 +116,49 @@ func TestOpenPopulatesID(t *testing.T) {
 	if createdID == [16]byte{} {
 		t.Fatal("created ID is zero")
 	}
-	m.Release()
-	m.UnsafeUnmap()
+	first := []byte("written before reopen")
+	_, err = m.Expand(len(first))
+	check(t, err)
+	check(t, m.Mutate(m.Data(), first))
+	check(t, m.Sync())
+	check(t, m.Release())
+	check(t, m.UnsafeUnmap())
+
+	m, err = Open("magic", &tt.file[0], &tt.file[1], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tt.setMem(m)
+	if m.id != createdID {
+		t.Errorf("opened ID %x != created ID %x", m.id, createdID)
+	}
+	if !bytes.Equal(m.Data(), first) {
+		t.Errorf("opened data %q, want %q", m.Data(), first)
+	}
+
+	// Frames written after Open carry m.id, so if Open did not restore it
+	// from the files, the writes below would be stamped with a zero ID and
+	// dropped (or rejected) by the next Open.
+	second := []byte("written after reopen, longer than the first write")
+	_, err = m.Expand(len(second))
+	check(t, err)
+	check(t, m.Mutate(m.Data(), second))
+	check(t, m.Sync())
+	check(t, m.Release())
+	check(t, m.UnsafeUnmap())
 
 	m2, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer m2.Release()
-	defer m2.UnsafeUnmap()
-
 	if m2.id != createdID {
-		t.Errorf("opened ID %x != created ID %x", m2.id, createdID)
+		t.Errorf("reopened ID %x != created ID %x", m2.id, createdID)
 	}
+	if !bytes.Equal(m2.Data(), second) {
+		t.Errorf("reopened data %q, want %q", m2.Data(), second)
+	}
+	check(t, m2.Release())
+	check(t, m2.UnsafeUnmap())
 }
 
 func randFill(b []byte) []byte {
