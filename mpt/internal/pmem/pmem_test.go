@@ -101,6 +101,36 @@ func testRecovery(t *testing.T) {
 	check(t, mem.UnsafeUnmap())
 }
 
+func TestOpenPopulatesID(t *testing.T) {
+	tt := &tester{t: t}
+	for i := range tt.file {
+		tt.file[i].tester = tt
+	}
+
+	m, err := Create("magic", &tt.file[0], &tt.file[1], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tt.setMem(m)
+	createdID := m.id
+	if createdID == [16]byte{} {
+		t.Fatal("created ID is zero")
+	}
+	m.Release()
+	m.UnsafeUnmap()
+
+	m2, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m2.Release()
+	defer m2.UnsafeUnmap()
+
+	if m2.id != createdID {
+		t.Errorf("opened ID %x != created ID %x", m2.id, createdID)
+	}
+}
+
 func randFill(b []byte) []byte {
 	for i := range b {
 		b[i] = byte(rand.N(256))

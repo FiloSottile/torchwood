@@ -380,6 +380,7 @@ func open(magic string, file1, file2, disk File) (_ *Mem, err error) {
 	if r1.id != r2.id {
 		return nil, fmt.Errorf("inconsistent pmem files: mismatched IDs")
 	}
+	m.id = r1.id
 	if r1.seq == r2.seq {
 		return nil, fmt.Errorf("inconsistent pmem files: identical sequence numbers (%#x == %#x)", r1.seq, r2.seq)
 	}
