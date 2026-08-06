@@ -115,6 +115,21 @@
 				resultDiv.innerHTML = '<p style="margin-top: 1rem;" class="error">Error looking up key.</p>';
 			}
 		});
+
+		function initLookupFromQuery() {
+			const params = new URLSearchParams(document.location.search);
+			const emailParam = params.get("email");
+			if (emailParam !== null) {
+				document.getElementById('lookup-email').value = emailParam;
+				document.getElementById('lookup-form').requestSubmit();
+			}
+		}
+
+		if (document.readyState === 'loading') {
+			document.addEventListener("DOMContentLoaded", initLookupFromQuery);
+		} else {
+			initLookupFromQuery();
+		}
 	</script>
 </body>
 </html>
