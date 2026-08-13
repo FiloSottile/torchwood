@@ -33,11 +33,15 @@
 
 - The bastion certificate is now generated once at startup.
 
+- Logs can now sign checkpoints with ML-DSA-44 keys.
+
 ### witnessctl
 
 - Added `set-bastions` command, which adds the given bastion(s) to every log
   that has none configured (for example after `pull-logs`), or replaces the
   bastions of every log with `-all`.
+
+- `add-key` and `pull-logs` now accept logs that use ML-DSA-44 keys.
 
 ### litebastion
 

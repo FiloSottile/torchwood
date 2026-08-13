@@ -5,7 +5,7 @@ import (
 	"log"
 	"strings"
 
-	"golang.org/x/mod/sumdb/note"
+	"filippo.io/torchwood"
 )
 
 func parseLogList(logList []byte, verbose bool) (map[string]string, error) {
@@ -21,7 +21,7 @@ func parseLogList(logList []byte, verbose bool) (map[string]string, error) {
 			vkey = ""
 			origin = ""
 		}()
-		v, err := note.NewVerifier(vkey)
+		v, err := torchwood.NewLogVerifier(vkey)
 		if err != nil {
 			if verbose {
 				log.Printf("Skipping invalid vkey %q: %v", vkey, err)
