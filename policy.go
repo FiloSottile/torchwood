@@ -153,7 +153,7 @@ func ParsePolicy(p []byte) (Policy, error) {
 			if len(fields) < 2 {
 				return nil, fmt.Errorf("line %d: invalid log definition: %q", i+1, line)
 			}
-			v, err := newLogVerifier(fields[1])
+			v, err := NewLogVerifier(fields[1])
 			if err != nil {
 				return nil, fmt.Errorf("line %d: invalid log vkey %q: %w", i+1, fields[1], err)
 			}
@@ -228,9 +228,9 @@ func ParsePolicy(p []byte) (Policy, error) {
 	}
 }
 
-// newLogVerifier parses a log vkey, which may use the Ed25519 signature
+// NewLogVerifier parses a log vkey, which may use the Ed25519 signature
 // algorithm or the ML-DSA-44 (sub)tree cosignature algorithm.
-func newLogVerifier(vkey string) (note.Verifier, error) {
+func NewLogVerifier(vkey string) (note.Verifier, error) {
 	_, rest, _ := strings.Cut(vkey, "+")
 	_, key64, _ := strings.Cut(rest, "+")
 	key, err := base64.StdEncoding.DecodeString(key64)
