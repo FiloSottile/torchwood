@@ -96,6 +96,12 @@ func (t *memTree) Version() (version int64, exact bool) {
 	return t.version, t.exact
 }
 
+// PersistedVersion returns the latest version number of the tree.
+// For an in-memory tree, this is the same as Version.
+func (t *memTree) PersistedVersion() int64 {
+	return t.version
+}
+
 // Snap returns a snapshot of t.
 func (t *memTree) Snap(version int64) (Snapshot, error) {
 	if t.err != nil {

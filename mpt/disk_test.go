@@ -171,6 +171,9 @@ func (tt *tester) reopen(minVer int64, minExact bool, format string, args ...any
 	if version < minVer || minExact != exact {
 		tt.t.Fatalf("reopen: %s: version = %d,%v, want ≥ %d,%v", kind, version, exact, minVer, minExact)
 	}
+	if tree.PersistedVersion() != version {
+		tt.t.Fatalf("reopen: %s: PersistedVersion = %d, want %d", kind, tree.PersistedVersion(), version)
+	}
 	if !exact {
 		f1.readOnly = false
 		f2.readOnly = false
@@ -434,6 +437,161 @@ func TestSetOverwriteDiskSize(t *testing.T) {
 		check(t, tree.Set(key, val(N+1, 'z')))
 		if got := diskSize(tree); got <= size {
 			t.Fatalf("N+1 overwrite did not grow disk: %d -> %d", size, got)
+		}
+	})
+}
+
+func TestPersistedVersion(t *testing.T) {
+	type step struct {
+		action        string // "check", "set", "snap", "sync", "reopen"
+		key           string
+		val           string
+		version       int64
+		wantVersion   int64
+		wantPersisted int64 // expected PersistedVersion on diskTree (on memTree, equals wantVersion)
+	}
+
+	tests := []struct {
+		name     string
+		diskOnly bool
+		steps    []step
+	}{
+		{
+			name: "initial_empty",
+			steps: []step{
+				{action: "check", wantVersion: 0, wantPersisted: 0},
+			},
+		},
+		{
+			name: "snap_without_sync",
+			steps: []step{
+				{action: "set", key: "k1", val: "v1", wantVersion: 0, wantPersisted: 0},
+				{action: "snap", version: 10, wantVersion: 10, wantPersisted: 0},
+			},
+		},
+		{
+			name: "snap_then_sync",
+			steps: []step{
+				{action: "set", key: "k1", val: "v1", wantVersion: 0, wantPersisted: 0},
+				{action: "snap", version: 10, wantVersion: 10, wantPersisted: 0},
+				{action: "sync", wantVersion: 10, wantPersisted: 10},
+			},
+		},
+		{
+			name:     "unflushed_crash_recovery",
+			diskOnly: true,
+			steps: []step{
+				{action: "set", key: "k1", val: "v1", wantVersion: 0, wantPersisted: 0},
+				{action: "snap", version: 10, wantVersion: 10, wantPersisted: 0},
+				{action: "sync", wantVersion: 10, wantPersisted: 10},
+				{action: "set", key: "k2", val: "v2", wantVersion: 10, wantPersisted: 10},
+				{action: "snap", version: 20, wantVersion: 20, wantPersisted: 10},
+				{action: "reopen", wantVersion: 10, wantPersisted: 10},
+			},
+		},
+		{
+			name: "negative_version_snap",
+			steps: []step{
+				{action: "set", key: "k1", val: "v1", wantVersion: 0, wantPersisted: 0},
+				{action: "snap", version: 10, wantVersion: 10, wantPersisted: 0},
+				{action: "sync", wantVersion: 10, wantPersisted: 10},
+				{action: "set", key: "k2", val: "v2", wantVersion: 10, wantPersisted: 10},
+				{action: "snap", version: -1, wantVersion: 10, wantPersisted: 10},
+				{action: "sync", wantVersion: 10, wantPersisted: 10},
+			},
+		},
+		{
+			name: "multiple_sync_cycles",
+			steps: []step{
+				{action: "set", key: "k1", val: "v1", wantVersion: 0, wantPersisted: 0},
+				{action: "snap", version: 10, wantVersion: 10, wantPersisted: 0},
+				{action: "sync", wantVersion: 10, wantPersisted: 10},
+				{action: "set", key: "k2", val: "v2", wantVersion: 10, wantPersisted: 10},
+				{action: "snap", version: 20, wantVersion: 20, wantPersisted: 10},
+				{action: "sync", wantVersion: 20, wantPersisted: 20},
+				{action: "set", key: "k3", val: "v3", wantVersion: 20, wantPersisted: 20},
+				{action: "snap", version: 30, wantVersion: 30, wantPersisted: 20},
+				{action: "sync", wantVersion: 30, wantPersisted: 30},
+			},
+		},
+	}
+
+	t.Run("diskTree", func(t *testing.T) {
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				f1 := new(memFile)
+				f2 := new(memFile)
+				f3 := new(memFile)
+
+				tree, err := New(f1, f2, f3)
+				check(t, err)
+				defer tree.Close()
+
+				for i, s := range tc.steps {
+					switch s.action {
+					case "set":
+						check(t, tree.Set(Key(s.key), Val(s.val)))
+					case "snap":
+						_, err := tree.Snap(s.version)
+						check(t, err)
+					case "sync":
+						check(t, tree.Sync())
+					case "reopen":
+						f1Copy := &memFile{data: slices.Clone(f1.data)}
+						f2Copy := &memFile{data: slices.Clone(f2.data)}
+						f3Copy := &memFile{data: slices.Clone(f3.data)}
+						check(t, tree.Close())
+						tree, err = New(f1Copy, f2Copy, f3Copy)
+						check(t, err)
+					case "check":
+						// Just assert versions.
+					default:
+						t.Fatalf("unknown action %q", s.action)
+					}
+
+					if v, _ := tree.Version(); v != s.wantVersion {
+						t.Fatalf("step %d (%s): Version() = %d, want %d", i, s.action, v, s.wantVersion)
+					}
+					if got := tree.PersistedVersion(); got != s.wantPersisted {
+						t.Fatalf("step %d (%s): PersistedVersion() = %d, want %d", i, s.action, got, s.wantPersisted)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("memTree", func(t *testing.T) {
+		for _, tc := range tests {
+			if tc.diskOnly {
+				continue
+			}
+			t.Run(tc.name, func(t *testing.T) {
+				tree := NewMemTree()
+				defer tree.Close()
+
+				for i, s := range tc.steps {
+					switch s.action {
+					case "set":
+						check(t, tree.Set(Key(s.key), Val(s.val)))
+					case "snap":
+						_, err := tree.Snap(s.version)
+						check(t, err)
+					case "sync":
+						check(t, tree.Sync())
+					case "check":
+						// Just assert versions.
+					default:
+						t.Fatalf("unknown action %q", s.action)
+					}
+
+					if v, _ := tree.Version(); v != s.wantVersion {
+						t.Fatalf("step %d (%s): Version() = %d, want %d", i, s.action, v, s.wantVersion)
+					}
+					if got := tree.PersistedVersion(); got != s.wantVersion {
+						t.Fatalf("step %d (%s): PersistedVersion() = %d, want %d", i, s.action, got, s.wantVersion)
+					}
+				}
+			})
 		}
 	})
 }

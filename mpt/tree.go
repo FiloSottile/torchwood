@@ -236,6 +236,10 @@ type Tree interface {
 	// expected to replay all Set calls up to the next version.
 	Version() (version int64, exact bool)
 
+	// PersistedVersion returns the latest version number that has been
+	// completely written and synced to disk.
+	PersistedVersion() int64
+
 	// Close calls Sync and then closes the underlying files.
 	Close() error
 }

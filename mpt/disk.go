@@ -93,11 +93,12 @@ type diskTree struct {
 	pmem *pmem.Mem
 	mem  []byte // cache of pmem.Data()
 
-	file1  File
-	file2  File
-	leaf   File
-	closed bool
-	err    error // sticky error
+	file1            File
+	file2            File
+	leaf             File
+	persistedVersion int64
+	closed           bool
+	err              error // sticky error
 }
 
 // broken marks the tree broken with err as the reason.
@@ -211,6 +212,7 @@ func memOpen(file1, file2, disk File, op string) (_ Tree, err error) {
 	}
 
 	t.mem = t.pmem.Data()
+	t.persistedVersion = t.hdr().version()
 
 	return t, nil
 }
@@ -233,6 +235,7 @@ func (t *diskTree) Sync() error {
 	if err := t.pmem.Sync(); err != nil {
 		return t.broken(err)
 	}
+	t.persistedVersion = t.hdr().version()
 	return nil
 }
 

@@ -126,6 +126,15 @@ func (t *diskTree) Version() (version int64, exact bool) {
 	return hdr.version(), hdr.exact()
 }
 
+// PersistedVersion returns the latest version number that has been
+// completely written and synced to disk.
+func (t *diskTree) PersistedVersion() int64 {
+	t.mmu.RLock()
+	defer t.mmu.RUnlock()
+
+	return t.persistedVersion
+}
+
 // Set sets the value associated with key to val.
 func (t *diskTree) Set(key Key, val Val) error {
 	t.mmu.RLock()
