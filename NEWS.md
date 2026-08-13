@@ -17,6 +17,9 @@
 - Added `HashReaderOverlay`, a `tlog.HashReader` that extends a tree with the
   stored hashes of appended records, held in memory.
 
+- Added `NewLogVerifier` to parse a log vkey, accepting regular Ed25519 keys
+  and ML-DSA-44 cosignature keys.
+
 ### mpt
 
 - New package with a Merkle Patricia Trie implementation.

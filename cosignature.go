@@ -439,3 +439,22 @@ func CosignatureTimestamp(sig note.Signature) (int64, error) {
 	}
 	return int64(timestamp), nil
 }
+
+// NewLogVerifier parses a log vkey, which may use the Ed25519 signature
+// algorithm or the ML-DSA-44 (sub)tree cosignature algorithm.
+func NewLogVerifier(vkey string) (note.Verifier, error) {
+	_, rest, _ := strings.Cut(vkey, "+")
+	_, key64, _ := strings.Cut(rest, "+")
+	key, err := base64.StdEncoding.DecodeString(key64)
+	if err != nil || len(key) == 0 {
+		return nil, errors.New("malformed verifier id")
+	}
+	switch key[0] {
+	case algEd25519:
+		return note.NewVerifier(vkey)
+	case algCosignatureMLDSA:
+		return NewCosignatureVerifier(vkey)
+	default:
+		return nil, errors.New("unknown verifier algorithm for log vkey")
+	}
+}
