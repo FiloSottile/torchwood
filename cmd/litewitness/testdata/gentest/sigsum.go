@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -16,6 +17,7 @@ import (
 	"log"
 	"net/url"
 
+	"filippo.io/torchwood"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/mod/sumdb/note"
@@ -25,6 +27,7 @@ import (
 )
 
 var seedFlag = flag.String("seed", "", "hex-encoded seed")
+var mldsaFlag = flag.Bool("mldsa", false, "generate an ML-DSA-44 log instead of a Sigsum log")
 
 func main() {
 	flag.Parse()
@@ -41,6 +44,12 @@ func main() {
 		}
 	}
 	fmt.Printf("- seed: %x\n", seed)
+
+	if *mldsaFlag {
+		genMLDSA(seed)
+		return
+	}
+
 	h := hkdf.New(sha256.New, seed, []byte("litewitness gentest"), nil)
 
 	publicKey, privateKey, _ := ed25519.GenerateKey(h)
@@ -114,6 +123,29 @@ func main() {
 	signTreeHead()
 	consistencyProof(1)
 	consistencyProof(3)
+}
+
+func genMLDSA(seed []byte) {
+	origin := "example.com/mldsa-log"
+
+	logKey, err := mldsa.NewPrivateKey(mldsa.MLDSA44(), seed)
+	if err != nil {
+		log.Fatal(err)
+	}
+	signer, err := torchwood.NewCosignatureSigner(origin, logKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("- log vkey: %s\n", signer.Verifier().String())
+
+	// SignSubtree is used to get a deterministic timestamp (zero).
+	rootHash := tlog.RecordHash([]byte("testonly"))
+	checkpoint := fmt.Sprintf("%s\n%d\n%s\n", origin, 1, base64.StdEncoding.EncodeToString(rootHash[:]))
+	sigLine, err := signer.SignSubtree(origin, 0, 1, rootHash)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("- checkpoint (size 1):\n%s\n%s", checkpoint, string(sigLine))
 }
 
 func noteKeyHash(name string, key []byte) uint32 {
