@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"filippo.io/torchwood"
 	"filippo.io/torchwood/internal/witness"
 	"golang.org/x/mod/sumdb/note"
 	sigsum "sigsum.org/sigsum-go/pkg/crypto"
@@ -135,7 +136,7 @@ func addLog(db *sqlite.Conn, origin string) {
 }
 
 func checkKeyMatches(origin string, vk string) {
-	v, err := note.NewVerifier(vk)
+	v, err := torchwood.NewLogVerifier(vk)
 	if err != nil {
 		log.Fatalf("Error parsing verifier key: %v", err)
 	}

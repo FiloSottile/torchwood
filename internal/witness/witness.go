@@ -385,7 +385,7 @@ func (w *Witness) getKeys(origin string) (note.Verifiers, error) {
 	}
 	var verifiers []note.Verifier
 	for _, k := range keys {
-		v, err := note.NewVerifier(k)
+		v, err := torchwood.NewLogVerifier(k)
 		if err != nil {
 			w.log.Warn("invalid key in database", "key", k, "error", err)
 			return nil, fmt.Errorf("invalid key %q: %v", k, err)
