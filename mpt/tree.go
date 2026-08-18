@@ -15,7 +15,7 @@
 // came from the recorded database history.
 //
 // To use the package, see the [Tree] interface, the [New] and [Create] constructors,
-// and the [Verify] function.
+// and the [VerifyLookup] function.
 // The rest of this doc comment describes the tree and proof encodings
 // in enough detail to build an alternate wire-compatible implementation.
 //
@@ -23,7 +23,7 @@
 //
 // The tree format used in this package is as follows.
 //
-// Conceptually, start with a complete [binary trie] of arbitrary height H,
+// Conceptually, start with a [binary trie] of arbitrary height H,
 // where H is larger than the number of bits in any key to be stored.
 // Each key-value pair is placed in the tree at the node reached by
 // starting at the root of the tree and following a path making
@@ -35,7 +35,9 @@
 // First, the tree is “path-compressed,” by removing inner nodes with a single child:
 // a node that would have pointed at a single-child node
 // is replaced by its child, recursively.
-// Every node is therefore either a leaf or an inner node with two children.
+// Every node is therefore either a leaf or an inner node with two children
+// whose keys agree until, but then differ at, bit position B.
+// The inner node stores B and pointers to the two children.
 // The path compression ensures that there are exactly N inner nodes for a tree with N+1 leaf nodes,
 // and it makes the height of the tree depend only on the specific set of keys,
 // not on the arbitrary height H.
@@ -57,8 +59,14 @@
 // This implies that we can batch or otherwise reorder insertions of distinct keys
 // without affecting the final tree structure.
 //
-// Although this package does not yet support them, the tree structure
-// described here supports keys of varying length.
+// The prefix property also implies that for any given prefix P of some stored key K,
+// the set of keys starting with prefix P form a distinct subtree of the tree
+// rooted at the node corresponding to the longest common prefix shared
+// by all those keys (which must in turn start with P).
+// That subtree root node may be K's leaf, the overall tree root, or some inner
+// node between them.
+//
+// The tree structure described here supports keys of varying length.
 // However, in such a tree, a lookup for a short key may need to compare
 // additional bits to distinguish the short key from a longer key with
 // the short key as a prefix. In this case, we define that a key of L bytes
@@ -69,13 +77,17 @@
 // The subsequent 0xFF bytes ensure that two distinct keys never have
 // the same padded bit sequence, even when one key is a prefix of the other.
 //
+// (Padding with a single repeated byte would not ensure distinct
+// extensions for distinct keys. For example, if the padding was
+// all 0x00 bytes, then "ABC" and "ABC\x00" would look identical when padded.)
+//
 // # Tree Snapshots
 //
 // A tree snapshot is defined as the hash of a tree, defined as follows, where H = SHA256.
 //
 //   - The hash of an empty tree is the hash of an empty (zero-length) input (e3b0c442...7852b855).
 //   - The hash of a leaf node is the hash of a zero byte followed by the length-prefixed key and length-prefixed value: H(0 || len(key) || key || len(val) || val).
-//   - The hash of an inner node is the hash a one byte followed by the node's bit position and its left and right children's hashes: H(1 || bit || left-hash || right-hash).
+//   - The hash of an inner node is the hash a one byte followed by the node's bit position B and its left and right children's hashes: H(1 || B || left-hash || right-hash).
 //
 // The lengths and bit position are [varint-encoded], so that most are one byte.
 //
@@ -84,65 +96,169 @@
 // Although this package does not make use of that fact, it does mean that a
 // large MPT could be split across multiple computers.
 //
-// # Proofs
+// # Proofs and How to Verify Them
 //
 // A proof cryptographically attests to a claim about the
-// presence or absence of a specific key in a specific tree snapshot.
-// The claim takes one of two forms:
+// presence or absence of a specific key or subtree
+// in a specific tree snapshot.
+// A verifier takes as input a snapshot tree hash,
+// a claim, and a proof, and it checks whether the proof is valid.
 //
-//   - The snapshot contains a specific key-value pair.
-//   - The snapshot does not contain a specific key.
+// If a snapshot's tree hash is the empty tree hash (SHA256 of the empty input),
+// then the tree is known to be empty, the proof is always an empty string,
+// and verification consists of checking whether the claim is true of an empty tree.
+// The rest of this discussion only considers claims about non-empty trees.
 //
-// In this package, a claim and proof are returned by the [Tree.Prove] method,
-// and the caller is expected to have already used the [Tree.Snapshot] method
-// to obtain the snapshot.
-// A verifier (possibly on another system) can then pass the snapshot,
-// claim, and proof to [Verify] to cryptographically verify the claim.
+// The proofs and verification algorithms for specific claims are
+// all derived from the following general form.
 //
-// The proof only contains the supplemental information needed for verification.
-// It does not include the snapshot or the claim, so the proof can only be checked
-// with respect to a specific snapshot and claim.
-// In fact, a single proof may be valid for many (snapshot, claim) pairs.
+// A “path proof” consists of a key-val pair and then the bit index and
+// sibling hash for each inner node from the key-val leaf up to
+// the root:
 //
-// The specific form of the proof depends on which of three cases is being proved.
+//	len(key) || key || len(val) || val || B₁ || H₁ || B₂ || H₂ || ... || B_N || H_N
 //
-//  1. If the snapshot is for an empty tree, the proof is empty (zero length).
-//     It proves any claim that a key is not present.
+// (The bit indexes B_i must be strictly decreasing.)
 //
-//  2. If the claim is that a specific key-value pair is present in a snapshot,
-//     then the proof is a concatenation of zero or more (bit, sibling hash) pairs
-//     giving the path from the key-value leaf node up to the root of the tree.
-//     The verifier computes the leaf hash from the key and value
-//     and then computes the hashes of successive parent nodes up to the root,
-//     checking that the final hash matches the snapshot.
-//     At each parent node, the key's specified bit position indicates whether
-//     the hash computed so far is the left or right child hash.
-//     The sibling hash provides the other.
-//     In the proof encoding, the bit positions are [varint-encoded].
+// The path proof includes all the information necessary to recompute
+// the overall tree hash:
 //
-//  3. If the claim is that a specific key is not present in a non-empty snapshot,
-//     then a lookup for key in the tree must instead end at some pair altkey-altval,
-//     where altkey ≠ key. The proof consists of the altkey-altval pair, including
-//     varint-encoded length prefixes, followed by the proof that altkey-altval
-//     is in the tree (as in case 2).
-//     The verifier proceeds as in case 2 to confirm that altkey-altval is in the snapshot.
-//     Along the way, it must also check that key and altkey agree at every bit position
-//     in the path, confirming that the lookup for key would indeed end at altkey instead.
+//		hash = H(0 || len(key) || key || len(val) || val)
+//		hash = H(1 || B₁ || hash || H₁) or H(1 || B₁ || H₁ || hash),
+//	        depending on whether bit B₁ of key is 0 or 1
+//		hash = H(1 || B₂ || hash || H₂) or H(1 || B₂ || H₂ || hash)
+//		...
+//		hash = H(1 || B_N || hash || H_N) or H(1 || B_N || H_N || hash)
 //
-// For a tree storing N-bit keys, the longest existence proof is N-1 (bit, sibling hash) pairs,
-// while the longest non-existence proof is a key, a value, and N (bit, sibling hash) pairs.
-// In both cases the worst case length is dominated by the hashes, about 32N bytes.
-// A tree using random keys (for example, using SHA256 hashes as keys)
+// Note that bit at index B_i in the key determines whether H_i
+// is the left or right input hash.
+//
+// “Path verification” is the process of computing the final hash
+// from the path proof and checking that it matches the snapshot's
+// tree hash. If it does, that proves that the snapshot includes
+// key-val correctly indexed.
+//
+// For a tree storing N-bit keys, the longest possible path proof is a key, a value,
+// and N (bit, sibling hash) pairs. That worst case length is dominated by the hashes,
+// about 32N bytes. A tree using random keys (for example, using SHA256 hashes as keys)
 // would of course never reach this maximum length for any sizable N.
 //
 // Note that this encoding is considerably more compact than some others.
 // In particular, the [Rust akd crate's MembershipProof] includes the inner node key
 // and sibling key for each step in the path, tripling the size of the proofs.
 //
+// # Key Proofs
+//
+// [Tree.Path](key) returns the path proof for key.
+// The path ends at key's own leaf if key is in the tree
+// and at a different leaf if it is not.
+//
+// [ProveLookup](key, path) reduces that path proof to (val, ok, proof),
+// claiming either that the key does not appear in the tree (ok=false)
+// or that it does appear with associated value val (ok=true).
+// [VerifyLookup](snap, key, val, ok, proof) verifies the claim.
+//
+// To claim that a snapshot does not contain a specific key,
+// the proof is the path proof for the alternate altkey-altval
+// that would be reached by a lookup for key.
+//
+// To verify the claim, run path verification, check that
+// altkey and key agree at every bit index B_i in the path,
+// and check that altkey ≠ key. (Altkey and key must differ at some
+// bit index not used in the path.)
+//
+// To claim that a snapshot contains a specific key-val pair,
+// the proof is a path proof shortened by omitting key and val.
+//
+// To verify the claim, run path verification using the key
+// and val passed to VerifyLookup.
+//
+// # Prefix Proofs
+//
+// [ProvePrefix](prefix, path) reduces the path proof returned by
+// [Tree.Path](prefix) to (hash, proof), where hash is the
+// hash of a (possibly empty) subtree containing all the keys in the
+// tree that begin with prefix. [VerifyPrefix](snap, prefix, hash, proof)
+// verifies the claim.
+// Note that VerifyPrefix does not verify that the subtree
+// is minimal. The verified subtree may also include keys with other prefixes.
+// This subtlety is discussed in the next section.
+//
+// Let P be the number of bits in the prefix.
+//
+// To claim that a snapshot contains no keys with the prefix,
+// the subtree hash is the empty tree hash, and the proof is the
+// path proof for the altkey-altval reached by looking up
+// prefix as if it were a key.
+//
+// To verify the claim, run path verification on the proof,
+// check that altkey and the prefix (padded) agree at every bit index B_i
+// in the path, and check that altkey (padded) does not start
+// with prefix (unpadded). That is, altkey and prefix must differ at
+// some bit index B < P not used in the path.
+//
+// Note: from the standpoint of strict correctness, it would suffice
+// for the prover to choose and look up _any_ padding of prefix
+// and for the verifier not to check that altkey's bits at indexes
+// B ≥ P. However, this would create multiple correct answers
+// for any particular ProvePrefix call, complicating conformance testing.
+// We choose to require that prefix be padded like a key
+// to force a specific answer from ProvePrefix and also to allow
+// provers to reuse their key lookup logic.
+// If there are no keys with prefix P in a tree,
+// then the negative claims from ProveLookup(P) and ProvePrefix(P)
+// share the same proof.
+//
+// To claim that a snapshot's subtree includes all keys with the prefix,
+// the proof is a path proof corresponding to looking up prefix as a key,
+// but the proof omits the steps that lead to the subtree hash.
+// That is, the proof is:
+//
+//	B_k || H_k || B_{k+1} || H_{k+1} || ... || B_N || H_N
+//
+// To verify the claim, check that B_k < P (the subtree is not more
+// specific than the prefix). Then assume that path verification
+// up to B_k produced the subtree hash and complete the verification,
+// walking the rest of the way to the root, using prefix bits to
+// decide whether each H_i is a left or right sibling.
+//
+// # One-Sided Weakness of Prefix Proofs
+//
+// As noted above, this verification only proves that the subtree
+// must contain all the keys starting with the prefix.
+// The subtree may contain other keys as well. In the most extreme case,
+// if hash = snap (claiming the entire tree as the subtree), then
+//
+//	VerifyPrefix(snap, prefix, hash, empty-proof)
+//
+// always succeeds, regardless of whether the tree is entirely keys
+// starting with prefix, entirely keys not starting with prefix,
+// or a mixture.
+//
+// Although a claim of too large a subtree will verify,
+// a claim of too small a subtree (excluding some keys starting
+// with the prefix) will not verify, because such a claim would
+// have to split the key space beyond the prefix length
+// by using B_k ≥ P, and the verifier checks B_k < P.
+//
+// The one-sided weakness of the claim is not a problem in practice,
+// since to fully check the map, the caller must also obtain
+// all the key-val pairs starting with prefix and use them to
+// recompute the subtree hash. While doing that, the caller can also
+// check that all the keys start with prefix. If they do, then
+// the subtree is not too large.
+//
+// An alternate design would be to have ProvePrefix return the
+// full path proof, checking that the subtree hash matches the
+// reconstructed hash before the first B_k < P.
+// However, these proofs would be longer for no practical benefit:
+// the caller would still need to obtain the full key-val pair list
+// to check the stored values.
+//
+// [Rust akd crate's MembershipProof]: https://docs.rs/akd/0.12.0/akd/struct.MembershipProof.html
 // [binary trie]: https://en.wikipedia.org/wiki/Trie
 // [transparent log]: https://research.swtch.com/tlog
 // [varint-encoded]: https://protobuf.dev/programming-guides/encoding/#varints
-// [Rust akd crate's MembershipProof]: https://docs.rs/akd/0.12.0/akd/struct.MembershipProof.html
 package mpt
 
 import (
@@ -154,6 +270,7 @@ import (
 	"fmt"
 	"iter"
 	"math/bits"
+	"slices"
 )
 
 // A Tree is a Merkle Patricia Tree implementation.
@@ -190,25 +307,44 @@ type Tree interface {
 	// set the version.
 	Snap(version int64) (Snapshot, error)
 
-	// Prove looks up key in the tree and returns a claimed
-	// associated value (if any) and whether the key is present at all,
-	// along with a proof of those two claimed results.
-	// Use [Verify] to verify the proof before trusting the claims.
+	// Path returns the path proof for key in the tree.
+	// If key is present in the tree, the path ends at key's own leaf.
+	// Otherwise the path ends at the leaf holding the different key
+	// where the lookup for key stopped.
+	// If the tree is empty, the path proof is empty (but non-nil).
 	//
-	// If Prove returns normally (with err == nil), then proof is non-nil,
-	// although it may be empty.
+	// Path is the raw material for the claims made by [ProveLookup] and
+	// [ProvePrefix]: ProveLookup(key, path) reduces the path returned by
+	// Path(key) to a key lookup claim and its proof, and
+	// ProvePrefix(prefix, path) reduces the path returned by
+	// Path(prefix) to a prefix claim and its proof.
 	//
-	// If Prove returns a non-nil error error, then val is Val{},
-	// ok is false, and proof is nil.
+	// If Path returns successfully (with err == nil), then proof is non-nil,
+	// although it may be empty. If Path returns a non-nil error,
+	// then proof is nil.
 	//
-	// Prove is a read-only operation and can be called
-	// concurrently with other calls to Prove, but not other
-	// calls to Set or Snap.
+	// Path is a read-only operation and can be called
+	// concurrently with other read-only calls and uses of iterators,
+	// but not with calls to Set or Snap.
 	//
-	// It is an error to call Prove if Set has been called without
+	// It is an error to call Path if Set has been called without
 	// a subsequent call to Snap: in that case, the caller does not
 	// know what the root hash is, so the proof will be unverifiable.
-	Prove(key Key) (val Val, ok bool, proof Proof, err error)
+	Path(key Key) (proof Proof, err error)
+
+	// Scan returns an iterator over all key-value pairs in the tree
+	// with the given prefix (according to [Key.HasPrefix]),
+	// in key order (according to [Key.Compare]).
+	//
+	// While iterating, the slices in the returned KeyVal must not
+	// be modified and are only valid during the iteration step in
+	// which they are returned. The caller must clone them if they
+	// need to be retained.
+	//
+	// Scan and the returned iterator are read-only operations
+	// and can be called concurrently with other read-only calls
+	// and uses of iterators, but not with calls to Set or Snap.
+	Scan(prefix []byte) iter.Seq2[KeyVal, error]
 
 	// Sync flushes all changes from past Set and Snap calls to
 	// the underlying files and then calls the files' Sync methods
@@ -240,7 +376,7 @@ type Tree interface {
 	Close() error
 }
 
-// ErrModifiedTree indicates that Prove was called after a Set without a Snap.
+// ErrModifiedTree indicates that Path was called after a Set without a Snap.
 var ErrModifiedTree = errors.New("tree modified without snapshot")
 
 // ErrInvalidPredict indicates that Predict was passed a set of
@@ -266,6 +402,20 @@ func checkChanges(changes []KeyVal) error {
 // A Key is a key used by a Tree.
 // It is usually a cryptographic hash of the actual key data.
 // A Key can be at most MaxKeyLen bytes.
+//
+// For purposes of comparison (using [Key.Compare] and [Key.HasPrefix])
+// a Key is considered to be an infinite stream that starts with the
+// bytes in the slice and continues with the infinite byte sequence “00 FF FF FF...”
+// (one 0x00 byte and then an infinite number of 0xFF bytes).
+// This convention is necessary in general because the MPT data structure
+// requires that no key be a prefix of another key except when the two keys are equal.
+// However, the nuance can be ignored in two very common cases:
+//
+// - When all keys are the same length (for example, when keys are fixed-length hash outputs).
+// - When all keys do not contain NUL bytes (for example, when keys are text).
+//
+// In both of these cases, [Key.Compare] and [Key.HasPrefix] are equivalent
+// to [bytes.Compare] and [bytes.HasPrefix].
 type Key []byte
 
 const (
@@ -294,8 +444,14 @@ var (
 	ErrValSize = errors.New("val too large")
 )
 
+// String returns the key encoded in hexadecimal.
 func (k Key) String() string {
 	return hex.EncodeToString(k[:])
+}
+
+// Clone returns a copy of the key.
+func (k Key) Clone() Key {
+	return slices.Clone(k)
 }
 
 // bit returns the n'th bit of the key.
@@ -363,15 +519,31 @@ func (p Key) overlap(q Key) int {
 
 // Compare returns the result of comparing two keys,
 // using the order in which the keys will appear in a [Tree].
-// Compare often agrees with [bytes.Compare].
-// In particular it is the same as [bytes.Compare] when
-// keys have fixed length, when no key can be a prefix of another,
-// or when keys do not contain NUL bytes.
-// In the general case, however, Compare returns
-// bytes.Compare(k+pad, k2+pad) where pad is the infinite byte sequence “00 FF FF FF...”.
-func (p Key) Compare(q Key) int {
-	c, _ := p.cmp(q)
+//
+// Compare usually agrees with [bytes.Compare], but not always.
+// See the [Key] documentation for more details.
+func (k Key) Compare(other Key) int {
+	c, _ := k.cmp(other)
 	return c
+}
+
+// HasPrefix reports whether k begins with the given prefix.
+//
+// HasPrefix usually agrees with [bytes.HasPrefix], but not always.
+// See the [Key] documentation for more details.
+func (k Key) HasPrefix(prefix []byte) bool {
+	return bytes.HasPrefix(k, prefix) ||
+		len(prefix) > len(k) && bytes.Equal(prefix[:len(k)], k) && prefix[len(k)] == 0x00 && allFF(prefix[len(k)+1:])
+}
+
+// allFF reports whether b is all 0xFF bytes.
+func allFF(b []byte) bool {
+	for _, c := range b {
+		if c != 0xFF {
+			return false
+		}
+	}
+	return true
 }
 
 // A Val is a value stored in a Tree.
@@ -382,16 +554,26 @@ func (v Val) String() string {
 	return hex.EncodeToString(v[:])
 }
 
+// Clone returns a copy of the value.
+func (v Val) Clone() Val {
+	return slices.Clone(v)
+}
+
 // KeyVal is a key-value pair.
 type KeyVal struct {
 	Key Key
 	Val Val
 }
 
-// Compare returns the result of comparing keys kv.Key and other.Key.
+// CompareKey returns the result of comparing keys kv.Key and other.Key.
 // It ignores the Val fields.
-func (kv KeyVal) Compare(other KeyVal) int {
+func (kv KeyVal) CompareKey(other KeyVal) int {
 	return kv.Key.Compare(other.Key)
+}
+
+// Equal reports whether kv and other have equal keys and values.
+func (kv KeyVal) Equal(other KeyVal) bool {
+	return bytes.Equal(kv.Key, other.Key) && bytes.Equal(kv.Val, other.Val)
 }
 
 // A keyPrefix is a prefix of a key, identifying a specific node.
@@ -468,25 +650,71 @@ func (h Hash) String() string {
 	return hex.EncodeToString(h[:])
 }
 
+// EmptyTreeHash returns the hash of an empty tree.
+// It is equal to TreeHash of an empty sequence.
+func EmptyTreeHash() Hash {
+	return emptyTreeHash
+}
+
+var emptyTreeHash Hash = sha256.Sum256(nil)
+
 // TreeHash computes the snapshot hash of a tree consisting of
 // the sequence of key-value items.
 //
 // The sequence must be sorted by increasing
-// key value (such as by [Key.Compare] or [KeyVal.Compare]),
+// key value (such as by [Key.Compare] or [KeyVal.CompareKey]),
 // and a key cannot appear multiple times in the list.
-// TreeHash panics if the sequence is not sorted or a key appears twice.
+// TreeHash panics with ErrKeyOrder
+// if the sequence is not sorted or a key appears twice.
 //
 // Use [slices.Values] to apply TreeHash to a slice of KeyVal.
 func TreeHash(seq iter.Seq[KeyVal]) Hash {
 	var s []node
+	var last Key
 	for kv := range seq {
-		s = reduce(append(s, node{prefix(kv.Key, maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
+		if last != nil && last.Compare(kv.Key) >= 0 {
+			panic(ErrKeyOrder)
+		}
+		if last == nil {
+			last = []byte{}
+		}
+		last = append(last[:0], kv.Key...)
+		// TODO: Could be more careful about reusing key buffers in the node stack.
+		s = reduce(append(s, node{prefix(kv.Key.Clone(), maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
 	}
 	return hashStack(s)
 }
 
-// A Proof is a proof of the result of looking up a target key in a
-// specific snapshot of a Tree.
+// TreeHashErr computes the snapshot hash of a tree consisting of
+// the sequence of key-value items.
+//
+// The sequence must be sorted by increasing
+// key value (such as by [Key.Compare] or [KeyVal.CompareKey]),
+// and a key cannot appear multiple times in the list.
+// TreeHashErr returns ErrKeyOrder if the sequence is not sorted or a key appears twice.
+// It also returns any error yielded by the iterator.
+func TreeHashErr(seq iter.Seq2[KeyVal, error]) (Hash, error) {
+	var s []node
+	var last Key
+	for kv, err := range seq {
+		if err != nil {
+			return Hash{}, err
+		}
+		if last != nil && last.Compare(kv.Key) >= 0 {
+			return Hash{}, ErrKeyOrder
+		}
+		if last == nil {
+			last = []byte{}
+		}
+		last = append(last[:0], kv.Key...)
+		// TODO: Could be more careful about reusing key buffers in the node stack.
+		s = reduce(append(s, node{prefix(kv.Key.Clone(), maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
+	}
+	return hashStack(s), nil
+}
+
+// A Proof is a proof of the result of looking up a target key
+// or key prefix in a specific snapshot of a Tree.
 type Proof []byte
 
 var (
@@ -495,20 +723,117 @@ var (
 
 	// ErrInvalidLookup indicates that ok is false but val is non-empty.
 	ErrInvalidLookup = errors.New("invalid mpt lookup result")
+
+	// ErrKeyOrder indicates that a KeyVal sequence is out of order
+	// or contains duplicates.
+	ErrKeyOrder = errors.New("mpt keys out of order")
+
+	// ErrInvalidPath indicates that a path proof passed to [ProveLookup]
+	// or [ProvePrefix] is not well-formed. This cannot happen for a
+	// path returned by [Tree.Path].
+	ErrInvalidPath = errors.New("invalid mpt path proof")
 )
 
-// Verify verifies that p is a valid proof that a lookup for key in snap
+// ProveLookup reduces the path proof returned by [Tree.Path](key) to the
+// claimed result of a lookup for key, along with a proof of that claim:
+// either key is not in the tree (ok is false) or it is present with
+// value val (ok is true). The proof can be verified with [VerifyLookup].
+//
+// ProveLookup returns an error only if path is malformed.
+// That cannot happen for a path returned by Tree.Path.
+func ProveLookup(key Key, path Proof) (val Val, ok bool, proof Proof, err error) {
+	if len(path) == 0 {
+		// Empty tree, so key is certainly not present.
+		return nil, false, Proof{}, nil
+	}
+	pkey, pval, rest, wellFormed := cutPathLeafErr(path)
+	if !wellFormed {
+		return nil, false, nil, ErrInvalidPath
+	}
+	if !bytes.Equal(pkey, key) {
+		// The lookup for key ended at a different key,
+		// so key is not in the tree. The proof is the whole path,
+		// including the alternate key-value pair.
+		return nil, false, path, nil
+	}
+	// The lookup found key. [VerifyLookup] recomputes the leaf hash from the
+	// key and val it is given, so the proof omits them.
+	return pval, true, rest, nil
+}
+
+// ProvePrefix reduces the path proof returned by [Tree.Path](prefix) to a
+// claimed tree hash for the subtree holding every key-value pair whose key
+// starts with prefix, along with a proof of that claim.
+// If no key starts with prefix, the claimed hash is [EmptyTreeHash].
+// The proof can be verified with [VerifyPrefix].
+//
+// ProvePrefix returns an error only if path is malformed.
+// That cannot happen for a path returned by Tree.Path.
+func ProvePrefix(prefix []byte, path Proof) (Hash, Proof, error) {
+	if len(path) == 0 {
+		// Empty tree, so no key starts with prefix.
+		return emptyTreeHash, Proof{}, nil
+	}
+	pkey, pval, rest, wellFormed := cutPathLeafErr(path)
+	if !wellFormed {
+		return Hash{}, nil, ErrInvalidPath
+	}
+	if !Key(pkey).HasPrefix(prefix) {
+		// Looking up prefix as a key ended at a key not starting with prefix.
+		// Since any key starting with prefix would have been reached instead,
+		// no key in the tree starts with prefix, and the whole path proves it.
+		return emptyTreeHash, path, nil
+	}
+
+	// Looking up prefix as a key ended inside the subtree of keys starting
+	// with prefix. Walking up from that leaf, each node splitting at a bit
+	// index at or past the end of the prefix is still inside the subtree;
+	// the first node splitting at an earlier bit index is the subtree's parent.
+	// So the hash computed just before that node is the subtree hash,
+	// and the remaining steps are the proof.
+	pbits := 8 * len(prefix)
+	h := hashLeaf(pkey, pval)
+	for len(rest) > 0 {
+		b, sib, next, wellFormed := cutPathStepErr(rest)
+		if !wellFormed {
+			return Hash{}, nil, ErrInvalidPath
+		}
+		if b < pbits {
+			break
+		}
+		if bit(pkey, b) == 0 {
+			h = hashInner(b, h, sib)
+		} else {
+			h = hashInner(b, sib, h)
+		}
+		rest = next
+	}
+	return h, rest, nil
+}
+
+// cutPathStepErr cuts the leading (bit index, sibling hash) step from the
+// path proof path, returning the step, the remaining path steps, and
+// whether path began with a well-formed step.
+func cutPathStepErr(path Proof) (b int, sib Hash, rest Proof, ok bool) {
+	ub, n := binary.Uvarint(path)
+	if n <= 0 || ub >= maxKeyBits || len(path)-n < 32 {
+		return 0, Hash{}, nil, false
+	}
+	return int(ub), Hash(path[n : n+32]), path[n+32:], true
+}
+
+// VerifyLookup verifies a proof that a lookup for key in snap
 // should return the result (val, ok).
-// If the proof is not valid, Verify returns a non-nil error.
+// If the proof is not valid, VerifyLookup returns a non-nil error.
 //
 // [VerifyPresent] and [VerifyNotPresent] are convenience functions
-// that wrap Verify.
-func Verify(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
+// that wrap VerifyLookup.
+func VerifyLookup(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
 	if !ok && len(val) != 0 {
 		return ErrInvalidLookup
 	}
 	if !ok && len(proof) == 0 {
-		if snap.Hash == emptyTreeHash() {
+		if snap.Hash == emptyTreeHash {
 			return nil
 		}
 		return ErrInvalidProof
@@ -536,21 +861,45 @@ func Verify(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
 		h = hashLeaf(pkey, pval)
 	}
 
-	b := 1 << 30
+	h, err := verifyPath(h, key, pkey, anyBit, proof)
+	if err != nil {
+		return err
+	}
+	if h != snap.Hash {
+		return ErrInvalidProof
+	}
+	return nil
+}
+
+// anyBit is the maxBit to pass to [verifyPath] to impose no bound
+// of its own. It is far above [maxKeyBits], the largest bit index
+// any tree can produce.
+const anyBit = 1 << 30
+
+// verifyPath runs path verification on the (bit index, sibling hash) steps
+// in proof, starting from the hash h computed for the end of the path and
+// returning the hash computed for the start of the path (the tree root).
+//
+// The bit indexes must be strictly decreasing, starting below maxBit.
+// The bits of key at those indexes decide whether each sibling hash is a
+// left or right input, and they must match the bits of pkey, the key
+// whose leaf the path actually ends at.
+func verifyPath(h Hash, key, pkey []byte, maxBit int, proof Proof) (Hash, error) {
+	b := maxBit
 	for len(proof) > 0 {
 		ub, n := binary.Uvarint(proof)
 		if n <= 0 || ub >= uint64(b) {
-			break
+			return Hash{}, ErrInvalidProof
 		}
 		b = int(ub)
 		proof = proof[n:]
 		if len(proof) < 32 {
-			return ErrInvalidProof
+			return Hash{}, ErrInvalidProof
 		}
 		var sib Hash
 		sib, proof = Hash(proof[:32]), proof[32:]
 		if bit(key, b) != bit(pkey, b) {
-			return ErrInvalidProof
+			return Hash{}, ErrInvalidProof
 		}
 		if bit(key, b) == 0 {
 			h = hashInner(b, h, sib)
@@ -558,20 +907,84 @@ func Verify(snap Snapshot, key, val []byte, ok bool, proof Proof) error {
 			h = hashInner(b, sib, h)
 		}
 	}
-	if len(proof) != 0 || h != snap.Hash {
+	return h, nil
+}
+
+// VerifyPresent is shorthand for [VerifyLookup](snap, key[:], val[:], true, proof).
+func VerifyPresent(snap Snapshot, key Key, val Val, proof Proof) error {
+	return VerifyLookup(snap, key[:], val[:], true, proof)
+}
+
+// VerifyNotPresent is shorthand for [VerifyLookup](snap, key[:], nil, false, proof).
+func VerifyNotPresent(snap Snapshot, key Key, proof Proof) error {
+	return VerifyLookup(snap, key[:], nil, false, proof)
+}
+
+// VerifyPrefix verifies a proof that the subtree of key-value pairs
+// with keys starting with prefix in snap has the given tree hash.
+// If the proof is not valid, VerifyPrefix returns an error.
+//
+// A valid proof establishes that the subtree contains every key-value pair
+// whose key starts with prefix. It does not establish that the subtree
+// contains nothing else. See the “One-Sided Weakness of Prefix Proofs”
+// section in the package documentation.
+func VerifyPrefix(snap Snapshot, prefix []byte, hash Hash, proof Proof) error {
+	if hash == emptyTreeHash {
+		// Claim: no key in the tree starts with prefix.
+		if len(proof) == 0 {
+			// Only an empty tree can make that claim without a proof.
+			if snap.Hash == emptyTreeHash {
+				return nil
+			}
+			return ErrInvalidProof
+		}
+		// The proof is the path proof for looking up prefix as a key.
+		// It must end at a key that does not start with prefix,
+		// which proves no such key is in the tree.
+		altkey, altval, rest, ok := cutPathLeafErr(proof)
+		if !ok {
+			return ErrInvalidProof
+		}
+		if Key(altkey).HasPrefix(prefix) {
+			return ErrInvalidProof
+		}
+		h, err := verifyPath(hashLeaf(altkey, altval), prefix, altkey, anyBit, rest)
+		if err != nil {
+			return err
+		}
+		if h != snap.Hash {
+			return ErrInvalidProof
+		}
+		return nil
+	}
+
+	// Claim: the subtree with the given hash contains every key starting with prefix.
+	// Path verification resumes at the subtree, so every remaining step must split
+	// at a bit index inside the prefix; otherwise the claimed subtree could be
+	// more specific than the prefix and omit some keys starting with prefix.
+	h, err := verifyPath(hash, prefix, prefix, 8*len(prefix), proof)
+	if err != nil {
+		return err
+	}
+	if h != snap.Hash {
 		return ErrInvalidProof
 	}
 	return nil
 }
 
-// VerifyPresent is shorthand for [Verify](snap, key[:], val[:], true, proof).
-func VerifyPresent(snap Snapshot, key Key, val Val, proof Proof) error {
-	return Verify(snap, key[:], val[:], true, proof)
-}
-
-// VerifyNotPresent is shorthand for [Verify](snap, key[:], nil, false, proof).
-func VerifyNotPresent(snap Snapshot, key Key, proof Proof) error {
-	return Verify(snap, key[:], nil, false, proof)
+// cutPathLeafErr cuts the leading key-value pair from the path proof
+// path, returning the pair, the remaining path steps, and whether path
+// began with a well-formed key-value pair.
+func cutPathLeafErr(path Proof) (key Key, val Val, rest Proof, ok bool) {
+	key, rest, ok = cutVar(path)
+	if !ok {
+		return nil, nil, nil, false
+	}
+	val, rest, ok = cutVar(rest)
+	if !ok {
+		return nil, nil, nil, false
+	}
+	return key, val, rest, true
 }
 
 // bit returns the n'th bit of the byte slice b, extended with padding.
@@ -585,12 +998,6 @@ func bit(b []byte, n int) int {
 		return 0
 	}
 	return 1
-}
-
-// emptyTreeHash returns the parent hash for a root no child nodes.
-func emptyTreeHash() Hash {
-	h := sha256.Sum256(nil)
-	return h
 }
 
 // hashLeaf returns the hash of a leaf with a given key and value,
@@ -648,7 +1055,7 @@ func reduce(s []node) []node {
 
 func hashStack(s []node) Hash {
 	if len(s) == 0 {
-		return emptyTreeHash()
+		return emptyTreeHash
 	}
 	for len(s) >= 2 {
 		s = append(s[:len(s)-2], s[len(s)-2].merge(s[len(s)-1]))
