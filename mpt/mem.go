@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"iter"
 )
 
 // A memTree is an in-memory [Tree].
@@ -42,7 +43,7 @@ func (n *memNode) bit() int {
 // NewMemTree returns a new in-memory [Tree].
 func NewMemTree() Tree {
 	t := &memTree{
-		hash:  emptyTreeHash(),
+		hash:  emptyTreeHash,
 		exact: true,
 	}
 	return t
@@ -245,33 +246,32 @@ func (t *memTree) predict(s []node, n *memNode, pbit int, list []KeyVal) ([]node
 	return s, list
 }
 
-// Prove returns a proof of the presence or absence of key in t.
-func (t *memTree) Prove(key Key) (val Val, ok bool, proof Proof, err error) {
+// Path returns the path proof for key in t.
+func (t *memTree) Path(key Key) (Proof, error) {
 	if t.err != nil {
-		return Val{}, false, nil, t.err
+		return nil, t.err
 	}
 	if t.dirty {
-		return Val{}, false, nil, ErrModifiedTree
+		return nil, ErrModifiedTree
 	}
 	if t.root == nil {
-		return Val{}, false, Proof{}, nil
+		return Proof{}, nil
 	}
-	return t.root.prove(-1, key)
+	return t.root.path(-1, key), nil
 }
 
-func (n *memNode) prove(pbit int, key Key) (val Val, ok bool, proof Proof, err error) {
+// path returns the path proof for key in the subtree rooted at n.
+// pbit is the parent bit depth, controlling whether n is viewed as a leaf.
+func (n *memNode) path(pbit int, key Key) Proof {
 	nbit := n.bit()
 	if nbit <= pbit {
 		// view n as leaf
-		if bytes.Equal(n.key, key) {
-			return n.val, true, Proof{}, nil
-		}
 		var p Proof
 		p = binary.AppendUvarint(p, uint64(len(n.key)))
-		p = append(p, n.key[:]...)
+		p = append(p, n.key...)
 		p = binary.AppendUvarint(p, uint64(len(n.val)))
-		p = append(p, n.val[:]...)
-		return Val{}, false, p, nil
+		p = append(p, n.val...)
+		return p
 	}
 
 	var sib Hash
@@ -284,10 +284,78 @@ func (n *memNode) prove(pbit int, key Key) (val Val, ok bool, proof Proof, err e
 		sib = n.left.hash(nbit)
 	}
 
-	val, ok, proof, _ = child.prove(nbit, key)
+	proof := child.path(nbit, key)
 	proof = binary.AppendUvarint(proof, uint64(nbit))
 	proof = append(proof, sib[:]...)
-	return
+	return proof
+}
+
+// Scan returns an iterator over key-val pairs whose keys start with prefix.
+func (t *memTree) Scan(prefix []byte) iter.Seq2[KeyVal, error] {
+	return func(yield func(KeyVal, error) bool) {
+		if t.err != nil {
+			yield(KeyVal{}, t.err)
+			return
+		}
+		n, pbit := t.subtree(prefix)
+		if n == nil {
+			return
+		}
+		n.scan(pbit, yield)
+	}
+}
+
+// subtree returns the root of the subtree holding every key that starts
+// with prefix, along with its parent's bit depth, or nil if the tree
+// holds no such key.
+func (t *memTree) subtree(prefix []byte) (*memNode, int) {
+	n := t.root
+	if n == nil {
+		return nil, 0
+	}
+
+	// Look up prefix as if it were a key, stopping at the first node
+	// that splits at a bit index at or past the end of the prefix:
+	// every key below that node agrees with the others there,
+	// so either all of them start with prefix or none do.
+	pbits := 8 * len(prefix)
+	pbit := -1
+	for n.bit() > pbit && n.bit() < pbits {
+		nbit := n.bit()
+		if bit(prefix, nbit) == 0 {
+			n = n.left
+		} else {
+			n = n.right
+		}
+		pbit = nbit
+	}
+
+	// Check one key to decide for all of them.
+	if !n.leftmost(pbit).key.HasPrefix(prefix) {
+		return nil, 0
+	}
+	return n, pbit
+}
+
+// leftmost returns the leaf holding the smallest key
+// in the subtree rooted at n.
+func (n *memNode) leftmost(pbit int) *memNode {
+	for n.bit() > pbit {
+		pbit = n.bit()
+		n = n.left
+	}
+	return n
+}
+
+// scan yields the key-val pairs in the subtree rooted at n, in key order,
+// reporting whether iteration should continue.
+func (n *memNode) scan(pbit int, yield func(KeyVal, error) bool) bool {
+	nbit := n.bit()
+	if nbit <= pbit {
+		// view n as leaf
+		return yield(KeyVal{n.key, n.val}, nil)
+	}
+	return n.left.scan(nbit, yield) && n.right.scan(nbit, yield)
 }
 
 // check checks all the tree invariants, walking the entire tree.
