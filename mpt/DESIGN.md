@@ -321,44 +321,34 @@ for legibility when reading hex dumps.
  - “exact” is a boolean indicating whether the tree includes
    only the changes made before Snap(version).
    If false, it may contain more changes made after that snapshot.
- - “root” is a pointer to the tree's root node,
-   represented as a 48-bit byte offset within the
-   tree memory.
+ - “root” is a pointer to the tree's root, using the same low-bit
+   tagging as a node's “left” and “right” fields (see below),
+   or nil (all zero bits) for an empty tree.
  - “hash” is the Merkle hash of the tree root.
    When “dirty” is set, the hash is stale and needs to be recomputed.
 
-The header is immediately followed by a sequence of Patricia nodes,
+The header is immediately followed by a sequence of nodes,
 each with the form:
 
 	bit      [ 1 byte]
 	dirty    [ 1 byte]
 	left     [ 6 bytes]
 	right    [ 6 bytes]
-	leaf     [ 6 bytes]
 	ihash    [32 bytes]
 
-In a standard implementation, each Patricia node represents both one leaf node
-and one inner node. In this format, the leaf data is stored in a separate
-parallel file. The nodes we are considering only store inner node data,
-although each node still serves as both inner node and leaf in the tree structure.
+In a standard Patricia implementation, each node represents both one
+leaf node and one inner node. In our format, the leaf data is stored
+in a separate parallel file. The nodes we are considering only store
+inner node data. In the tree structure, the low bit of the left/right
+field indicates whether the field contains an inner node offset or a
+leaf offset. A zero indicates nil and is only possible in the header's
+root field.
 
-Remember that each Patricia node represents both one leaf node
-and one inner node.
-
- - “key” and “val” are the key and value for the leaf node.
- - “left” and “right” are pointers to the inner node's
-   left and right children;
-   “bit” is the bit position to use to decide between them
-   during a lookup.
-   Since keys are 32 bytes, bit positions 0..255 fit in a single byte.
-   The leaf-only node is an exception: it needs a bit position
-   set to -1, but it can be identified by having “left” and “right” set to 0
-   (nil pointer)
-   and treated as a special case when reading “bit”.
  - “ihash” is the Merkle hash of the inner node.
    When “dirty” is set, the hash is stale and needs to be recomputed.
-   The Merkle hash of the leaf node is not stored explicitly.
-   It is recomputed from “key” and “val” whenever it is needed.
+   The Merkle hash of a leaf is not stored explicitly.
+   It is recomputed from its key and value, read from the leaf file,
+   whenever it is needed.
 
 After setting the value associated with a given key,
 the “ihash” values in all nodes back to the root
@@ -384,8 +374,8 @@ Snapshots are still amortized O(1) but not an actual O(1).
 If the snapshot operations caused problematic latency hiccups,
 this lazy recomputation could be abandoned.
 
-Notice that a Patricia node takes 52 bytes,
-so a 2-billion node tree requires about 104 GB of memory,
+Notice that a Patricia node takes 46 bytes,
+so a 2-billion node tree requires about 92 GB of memory,
 well within the 512 GB we allotted ourselves on our
 “reasonably configured server”.
 (There is another 130 GB of disk for the leaf file,
@@ -454,12 +444,9 @@ We do this by reading as many valid (checksum-matching) frames
 as possible from the file and stopping at EOF or when we reach
 a frame that is truncated or does not have a valid checksum.
 
-The leaf file data consists of a sequence of leaves.
-The leaf nodes are allocated in parallel with the Patricia nodes,
-so that Patricia node N corresponds to leaf N.
-Since each leaf may be variable length,
-the leaf pointer in the Patricia node records where
-the leaf begins on disk.
+The leaf file data consists of a sequence of leaves, appended one at a
+time as new keys are set. Since each leaf may be variable length, a
+leaf pointer records where the leaf begins on disk.
 
 ## Compaction {#compaction}
 

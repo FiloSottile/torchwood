@@ -380,7 +380,7 @@ func TestSetOverwriteDiskSize(t *testing.T) {
 		check(t, tree.Set(key, val(100, 'a')))
 		size := diskSize(tree)
 
-		check(t, tree.Set(key, val(101, 'b'))) // one byte longer
+		check(t, tree.Set(key, val(102, 'b'))) // two bytes longer
 		if got := diskSize(tree); got <= size {
 			t.Fatalf("longer overwrite did not grow disk: %d -> %d", size, got)
 		}
