@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"iter"
 )
 
 // hash returns the hash for the given tree node.
@@ -338,44 +339,43 @@ func (t *diskTree) predict(s []node, a addr, pbit int, list []KeyVal) ([]node, [
 	return s, list, nil
 }
 
-// Prove returns a proof of the presence or absence of key in t.
-func (t *diskTree) Prove(key Key) (val Val, ok bool, proof Proof, err error) {
+// Path returns the path proof for key in t.
+func (t *diskTree) Path(key Key) (Proof, error) {
 	t.mmu.RLock()
 	defer t.mmu.RUnlock()
 
 	if t.err != nil {
-		return Val{}, false, nil, t.err
+		return nil, t.err
 	}
 	if t.hdr().dirty() {
-		return Val{}, false, nil, ErrModifiedTree
+		return nil, ErrModifiedTree
 	}
 	root, err := t.node(t.hdr().root())
 	if err != nil {
-		return Val{}, false, nil, err
+		return nil, err
 	}
 	if root == nil {
-		return Val{}, false, Proof{}, nil
+		return Proof{}, nil
 	}
-	return root.prove(t, -1, key)
+	return root.path(t, -1, key)
 }
 
-func (n *diskNode) prove(t *diskTree, pbit int, key Key) (val Val, ok bool, proof Proof, err error) {
+// path returns the path proof for key in the subtree rooted at n.
+// pbit is the parent bit depth, controlling whether n is viewed as a leaf.
+func (n *diskNode) path(t *diskTree, pbit int, key Key) (Proof, error) {
 	nbit := n.bit()
 	if nbit <= pbit {
 		// view n as leaf
 		nkey, nval, err := n.keyVal(t)
 		if err != nil {
-			return Val{}, false, nil, err
-		}
-		if bytes.Equal(nkey, key) {
-			return nval, true, Proof{}, nil
+			return nil, err
 		}
 		var p Proof
 		p = binary.AppendUvarint(p, uint64(len(nkey)))
-		p = append(p, nkey[:]...)
+		p = append(p, nkey...)
 		p = binary.AppendUvarint(p, uint64(len(nval)))
-		p = append(p, nval[:]...)
-		return Val{}, false, p, nil
+		p = append(p, nval...)
+		return p, nil
 	}
 
 	childAddr, sibAddr := n.left(), n.right()
@@ -384,24 +384,141 @@ func (n *diskNode) prove(t *diskTree, pbit int, key Key) (val Val, ok bool, proo
 	}
 	child, err := t.node(childAddr)
 	if err != nil {
-		return Val{}, false, nil, err
+		return nil, err
 	}
 	sib, err := t.node(sibAddr)
 	if err != nil {
-		return Val{}, false, nil, err
+		return nil, err
 	}
 	sibHash, err := sib.hash(t, nbit)
 	if err != nil {
-		return Val{}, false, nil, err
+		return nil, err
 	}
 
-	val, ok, proof, err = child.prove(t, nbit, key)
+	proof, err := child.path(t, nbit, key)
 	if err != nil {
-		return
+		return nil, err
 	}
 	proof = binary.AppendUvarint(proof, uint64(nbit))
 	proof = append(proof, sibHash[:]...)
-	return
+	return proof, nil
+}
+
+// Scan returns an iterator over key-val pairs whose keys start with prefix.
+func (t *diskTree) Scan(prefix []byte) iter.Seq2[KeyVal, error] {
+	return func(yield func(KeyVal, error) bool) {
+		t.mmu.RLock()
+		defer t.mmu.RUnlock()
+
+		if t.err != nil {
+			yield(KeyVal{}, t.err)
+			return
+		}
+		n, pbit, err := t.subtree(prefix)
+		if err != nil {
+			yield(KeyVal{}, err)
+			return
+		}
+		if n == nil {
+			return
+		}
+		n.scan(t, pbit, yield)
+	}
+}
+
+// subtree returns the root of the subtree holding every key that starts
+// with prefix, along with its parent's bit depth, or nil if the tree
+// holds no such key.
+func (t *diskTree) subtree(prefix []byte) (*diskNode, int, error) {
+	n, err := t.node(t.hdr().root())
+	if err != nil || n == nil {
+		return nil, 0, err
+	}
+
+	// Look up prefix as if it were a key, stopping at the first node
+	// that splits at a bit index at or past the end of the prefix:
+	// every key below that node agrees with the others there,
+	// so either all of them start with prefix or none do.
+	pbits := 8 * len(prefix)
+	pbit := -1
+	for n.bit() > pbit && n.bit() < pbits {
+		nbit := n.bit()
+		a := n.left()
+		if bit(prefix, nbit) != 0 {
+			a = n.right()
+		}
+		if n, err = t.child(a); err != nil {
+			return nil, 0, err
+		}
+		pbit = nbit
+	}
+
+	// Check one key to decide for all of them.
+	left, err := n.leftmost(t, pbit)
+	if err != nil {
+		return nil, 0, err
+	}
+	key, err := left.key(t)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !key.HasPrefix(prefix) {
+		return nil, 0, nil
+	}
+	return n, pbit, nil
+}
+
+// child returns the node at address a, which must not be a nil address.
+func (t *diskTree) child(a addr) (*diskNode, error) {
+	n, err := t.node(a)
+	if err != nil {
+		return nil, err
+	}
+	if n == nil {
+		return nil, t.broken(errCorrupt)
+	}
+	return n, nil
+}
+
+// leftmost returns the leaf holding the smallest key
+// in the subtree rooted at n.
+func (n *diskNode) leftmost(t *diskTree, pbit int) (*diskNode, error) {
+	for n.bit() > pbit {
+		pbit = n.bit()
+		next, err := t.child(n.left())
+		if err != nil {
+			return nil, err
+		}
+		n = next
+	}
+	return n, nil
+}
+
+// scan yields the key-val pairs in the subtree rooted at n, in key order,
+// reporting whether iteration should continue.
+func (n *diskNode) scan(t *diskTree, pbit int, yield func(KeyVal, error) bool) bool {
+	nbit := n.bit()
+	if nbit <= pbit {
+		// view n as leaf
+		key, val, err := n.keyVal(t)
+		if err != nil {
+			yield(KeyVal{}, err)
+			return false
+		}
+		return yield(KeyVal{key, val}, nil)
+	}
+
+	left, err := t.child(n.left())
+	if err != nil {
+		yield(KeyVal{}, err)
+		return false
+	}
+	right, err := t.child(n.right())
+	if err != nil {
+		yield(KeyVal{}, err)
+		return false
+	}
+	return left.scan(t, nbit, yield) && right.scan(t, nbit, yield)
 }
 
 func (t *diskTree) check() {

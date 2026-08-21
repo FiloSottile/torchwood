@@ -201,7 +201,7 @@ func memOpen(file1, file2, disk File, op string) (_ Tree, err error) {
 		if err != nil {
 			return nil, err
 		}
-		h := emptyTreeHash()
+		h := emptyTreeHash
 		if err := t.mutate(mem[hdrHash:], h[:]); err != nil {
 			return nil, err
 		}
