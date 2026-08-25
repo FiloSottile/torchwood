@@ -7,6 +7,7 @@ package torchwood
 import (
 	"crypto"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -18,8 +19,6 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
-
-	"filippo.io/mldsa"
 
 	"golang.org/x/crypto/cryptobyte"
 	"golang.org/x/mod/sumdb/note"
