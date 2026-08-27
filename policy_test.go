@@ -2,10 +2,10 @@ package torchwood_test
 
 import (
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"testing"
 
-	"filippo.io/mldsa"
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"

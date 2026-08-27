@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"encoding/base64"
 	"strings"
 	"testing"
 
-	"filippo.io/mldsa"
 	"filippo.io/torchwood"
 	"golang.org/x/mod/sumdb/note"
 	"golang.org/x/mod/sumdb/tlog"
