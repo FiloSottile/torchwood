@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -22,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -38,12 +40,15 @@ import (
 	"filippo.io/torchwood/internal/witness"
 )
 
+const algoMLDSA44Sigsum = "mldsa-44@sigsum.org"
+
 var nameFlag = flag.String("name", "", "URL-like (e.g. example.com/foo) name of this witness")
 var dbFlag = flag.String("db", "litewitness.db", "path to sqlite database")
 var sshAgentFlag = flag.String("ssh-agent", "litewitness.sock", "path to ssh-agent socket")
 var listenFlag = flag.String("listen", "localhost:7380", "address to listen for HTTP requests")
 var noListenFlag = flag.Bool("no-listen", false, "do not open any listening socket, rely exclusively on bastions")
-var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of the witness key")
+var keyFlag = flag.String("key", "", "SSH fingerprint of Ed25519 witness key (with SHA256: prefix), also used for authentication with bastion")
+var mldsaKeyFlag = flag.String("mldsa-key", "", "SSH fingerprint of ML-DSA-44 witness key (with SHA256: prefix)")
 var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
 var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
 var listenMetricsFlag = flag.String("listen-metrics", "", "address to listen for metrics requests, instead of exposing them on the main listener")
@@ -103,6 +108,12 @@ func onSignal(signo os.Signal, callback func()) {
 
 func main() {
 	flag.Parse()
+	if len(flag.Args()) > 0 {
+		fatal("Too many arguments", "args", flag.Args())
+	}
+	if *keyFlag == "" {
+		fatal("Flag -key is required")
+	}
 
 	var level = new(slog.LevelVar)
 	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
@@ -119,21 +130,33 @@ func main() {
 		}
 	})
 
-	signer := connectToSSHAgent()
-	bastionCertX509, err := selfSignedCertificate(signer)
+	signers := connectToSSHAgent()
+
+	var bastionSigner *signer
+	for i := range signers {
+		// Use the sole, required Ed25519 signer
+		if *keyFlag == signers[i].sshFP() {
+			bastionSigner = signers[i]
+		}
+	}
+	bastionCertX509, err := selfSignedCertificate(bastionSigner)
 	if err != nil {
 		fatal("generating self-signed certificate", "err", err)
 	}
 	bastionCert := tls.Certificate{
 		Certificate: [][]byte{bastionCertX509},
-		PrivateKey:  signer,
+		PrivateKey:  bastionSigner,
 	}
 
-	w, err := witness.NewWitness(*dbFlag, *nameFlag, signer, slog.Default())
+	cryptoSigners := make([]crypto.Signer, len(signers))
+	for i, s := range signers {
+		cryptoSigners[i] = s
+	}
+	w, err := witness.NewWitness(*dbFlag, *nameFlag, cryptoSigners, slog.Default())
 	if err != nil {
 		fatal("creating witness", "err", err)
 	}
-	slog.Info("verifier key", "vkey", w.VerifierKey())
+	slog.Info("verifier keys", "vkeys", strings.Join(w.VerifierKeys(), " "))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -277,66 +300,101 @@ func main() {
 	}
 }
 
-func connectToSSHAgent() *signer {
+func connectToSSHAgent() []*signer {
 	conn, err := net.Dial("unix", *sshAgentFlag)
 	if err != nil {
 		fatal("dialing ssh-agent", "err", err)
 	}
 	a := agent.NewClient(conn)
-	signers, err := a.Signers()
+	aSigners, err := a.Signers()
 	if err != nil {
 		fatal("getting keys from ssh-agent", "err", err)
 	}
 	slog.Info("connected to ssh-agent", "addr", *sshAgentFlag)
-	var signer *signer
-	var keys []string
-	for _, s := range signers {
-		if s.PublicKey().Type() != ssh.KeyAlgoED25519 {
-			continue
+	var signers []*signer
+	var availableKeys []string
+	for _, s := range aSigners {
+		availableKeys = append(availableKeys, fmt.Sprintf("%s|%s", s.PublicKey().Type(), ssh.FingerprintSHA256(s.PublicKey())))
+		switch s.PublicKey().Type() {
+		case ssh.KeyAlgoED25519:
+			ss, err := newED25519Signer(s)
+			if err != nil {
+				fatal("newED25519Signer", "err", err)
+			}
+			if ss.sshFP() == *keyFlag {
+				signers = append(signers, ss)
+			}
+			// For backwards compatibility, also accept a hex-encoded SHA-256
+			// hash of the public key, which is what -key used to be.
+			hh := sha256.Sum256(ss.Public().(ed25519.PublicKey))
+			h := hex.EncodeToString(hh[:])
+			if h == *keyFlag {
+				signers = append(signers, ss)
+				*keyFlag = ss.sshFP()
+			}
+		case algoMLDSA44Sigsum:
+			ss, err := newMLDSA44Signer(s)
+			if err != nil {
+				fatal("newMLDSA44Signer", "err", err)
+			}
+			if ss.sshFP() == *mldsaKeyFlag {
+				signers = append(signers, ss)
+			}
 		}
-		ss, err := newSigner(s)
-		if err != nil {
-			fatal("new signer", "err", err)
-		}
-		if ssh.FingerprintSHA256(s.PublicKey()) == *keyFlag {
-			signer = ss
-			break
-		}
-		// For backwards compatibility, also accept a hex-encoded SHA-256 hash
-		// of the public key, which is what -key used to be.
-		hh := sha256.Sum256(ss.Public().(ed25519.PublicKey))
-		h := hex.EncodeToString(hh[:])
-		if h == *keyFlag {
-			signer = ss
-			break
-		}
-		keys = append(keys, h)
 	}
-	if signer == nil {
-		fatal("ssh-agent does not contain Ed25519 key", "expected", *keyFlag, "found", keys)
+
+	if *keyFlag != "" && !slices.ContainsFunc(signers, func(ss *signer) bool { return ss.sshFP() == *keyFlag }) {
+		fatal("ssh-agent does not contain expected key", ssh.KeyAlgoED25519, *keyFlag, "available", availableKeys)
 	}
-	slog.Info("found key", "fingerprint", *keyFlag)
-	return signer
+	if *mldsaKeyFlag != "" && !slices.ContainsFunc(signers, func(ss *signer) bool { return ss.sshFP() == *mldsaKeyFlag }) {
+		fatal("ssh-agent does not contain expected key", algoMLDSA44Sigsum, *mldsaKeyFlag, "available", availableKeys)
+	}
+
+	fps := make([]string, len(signers))
+	for i := range signers {
+		fps[i] = signers[i].sshFP()
+	}
+	slog.Info("found keys", "fingerprints", strings.Join(fps, " "))
+
+	return signers
 }
 
 type signer struct {
 	s ssh.Signer
-	p ed25519.PublicKey
+	p crypto.PublicKey
 }
 
-func newSigner(s ssh.Signer) (*signer, error) {
+func newED25519Signer(s ssh.Signer) (*signer, error) {
 	// agent.Key doesn't implement ssh.CryptoPublicKey.
 	k, err := ssh.ParsePublicKey(s.PublicKey().Marshal())
 	if err != nil {
-		return nil, errors.New("internal error: ssh public key can't be parsed")
+		return nil, fmt.Errorf("internal error: ssh Ed25519 public key can't be parsed; err: %w", err)
 	}
 	ck, ok := k.(ssh.CryptoPublicKey)
 	if !ok {
-		return nil, errors.New("internal error: ssh public key can't be retrieved")
+		return nil, errors.New("internal error: ssh Ed25519 public key can't be retrieved")
 	}
 	pk, ok := ck.CryptoPublicKey().(ed25519.PublicKey)
 	if !ok {
 		return nil, errors.New("internal error: ssh public key type is not Ed25519")
+	}
+	return &signer{s: s, p: pk}, nil
+}
+
+func newMLDSA44Signer(s ssh.Signer) (*signer, error) {
+	k := struct {
+		Algo string
+		Pub  []byte
+	}{}
+	if err := ssh.Unmarshal(s.PublicKey().Marshal(), &k); err != nil {
+		return nil, fmt.Errorf("internal error: ssh ML-DSA-44 public key can't be parsed; err: %w", err)
+	}
+	if k.Algo != algoMLDSA44Sigsum {
+		return nil, fmt.Errorf("internal error: ssh public key algo is not %q", algoMLDSA44Sigsum)
+	}
+	pk, err := mldsa.NewPublicKey(mldsa.MLDSA44(), k.Pub)
+	if err != nil {
+		return nil, fmt.Errorf("internal error: ssh public key type is not MLDSA44; err: %w", err)
 	}
 	return &signer{s: s, p: pk}, nil
 }
@@ -376,6 +434,10 @@ pre {
 <pre>
 `
 
+func (ss *signer) sshFP() string {
+	return ssh.FingerprintSHA256(ss.s.PublicKey())
+}
+
 func indexHandler(w *witness.Witness) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		db, err := witness.OpenDB(*dbFlag)
@@ -388,7 +450,10 @@ func indexHandler(w *witness.Witness) http.HandlerFunc {
 		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(rw, indexHeader)
 		fmt.Fprintf(rw, "# litewitness %s\n\n", html.EscapeString(*nameFlag))
-		fmt.Fprintf(rw, "%s\n\n", html.EscapeString(w.VerifierKey()))
+		for _, vkey := range w.VerifierKeys() {
+			fmt.Fprintf(rw, "%s\n", html.EscapeString(vkey))
+		}
+		fmt.Fprintf(rw, "\n")
 		fmt.Fprintf(rw, "## Logs\n\n")
 		sqlitex.Execute(db, "SELECT origin, tree_size, tree_hash FROM log", &sqlitex.ExecOptions{
 			ResultFunc: func(stmt *sqlite.Stmt) error {
