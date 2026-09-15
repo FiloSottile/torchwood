@@ -63,6 +63,19 @@ func (s *ConnectionSet) Configure(ctx context.Context, addrs []string) {
 	}
 }
 
+func bastionNoKeyConnectFunc() func(context.Context, string) {
+	return func(ctx context.Context, addr string) {
+		for {
+			slog.Error("cannot connect to bastion, because no bastion key is configured (flag --bastion-key)", "bastionaddr", addr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+		}
+	}
+}
+
 func bastionConnectFunc(bastionSigner *signer, testCert bool, srv *http.Server) func(context.Context, string) {
 	bastionCertX509, err := selfSignedCertificate(bastionSigner)
 	if err != nil {

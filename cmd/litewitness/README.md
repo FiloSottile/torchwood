@@ -56,13 +56,17 @@ SSH_AUTH_SOCK=litewitness.sock ssh-add litewitness.pem
             address to listen for HTTP requests (default "localhost:7380")
     -no-listen
             do not open any listening socket, rely exclusively on bastions
+    -bastion-key
+            SSH fingerprint (with SHA256: prefix) of key for authenticating with bastions
 
 The `-listen` flag will listen for HTTP requests on the specified port. (HTTPS
 needs to be terminated outside of litewitness.) Alternatively, `-no-listen` can
 be used to rely exclusively on per-log bastions, which are configured in the
 database with the `add-bastion`, `del-bastion`, and `set-bastions` witnessctl
 commands (see below) and cause litewitness to serve requests through a bastion
-reverse proxy.
+reverse proxy. litewitness does TLS client authentication with bastions using a
+certificate self-signed by a separate bastion-key (the witness key was
+previously used for this).
 
     -obscurity
             enable obscurity mode (disable / and /logz and /metrics endpoints)

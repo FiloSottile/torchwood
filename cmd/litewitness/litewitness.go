@@ -48,6 +48,7 @@ func main() {
 	var listenFlag = flag.String("listen", "localhost:7380", "address to listen for HTTP requests")
 	var noListenFlag = flag.Bool("no-listen", false, "do not open any listening socket, rely exclusively on bastions")
 	var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of the witness key")
+	var bastionKeyFlag = flag.String("bastion-key", "", "SSH fingerprint (with SHA256: prefix) of key for authenticating with bastions")
 	var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
 	var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
 	var listenMetricsFlag = flag.String("listen-metrics", "", "address to listen for metrics requests, instead of exposing them on the main listener")
@@ -68,7 +69,7 @@ func main() {
 		}
 	})
 
-	signer := connectToSSHAgent(*sshAgentFlag, *keyFlag)
+	bastionSigner, signer := connectToSSHAgent(*sshAgentFlag, *bastionKeyFlag, *keyFlag)
 
 	w, err := witness.NewWitness(*dbFlag, *nameFlag, signer, slog.Default())
 	if err != nil {
@@ -129,7 +130,14 @@ func main() {
 	}
 	e := make(chan error, 1)
 
-	bastionSet := NewConnectionSet(bastionConnectFunc(signer, *testCertFlag, srv))
+	var bastionSet *ConnectionSet
+	if bastionSigner != nil {
+		bastionSet = NewConnectionSet(bastionConnectFunc(bastionSigner, *testCertFlag, srv))
+		slog.Info("bastion key", "fingerprint", fmt.Sprintf("%x", sha256.Sum256(bastionSigner.Public().(ed25519.PublicKey))))
+	} else {
+		bastionSet = NewConnectionSet(bastionNoKeyConnectFunc())
+		slog.Info("no bastion key is configured, connections to bastions will not be possible")
+	}
 
 	// Handle log-specific bastions.
 	logBastions, err := w.AllBastions()
@@ -173,7 +181,7 @@ func main() {
 	}
 }
 
-func connectToSSHAgent(sshAgent string, key string) *signer {
+func connectToSSHAgent(sshAgent string, bastionKey string, key string) (*signer, *signer) {
 	conn, err := net.Dial("unix", sshAgent)
 	if err != nil {
 		fatal("dialing ssh-agent", "err", err)
@@ -184,6 +192,7 @@ func connectToSSHAgent(sshAgent string, key string) *signer {
 		fatal("getting keys from ssh-agent", "err", err)
 	}
 	slog.Info("connected to ssh-agent", "addr", sshAgent)
+	var bastionSigner *signer
 	var signer *signer
 	var keys []string
 	for _, s := range signers {
@@ -194,9 +203,12 @@ func connectToSSHAgent(sshAgent string, key string) *signer {
 		if err != nil {
 			fatal("new signer", "err", err)
 		}
-		if ssh.FingerprintSHA256(s.PublicKey()) == key {
+		fp := ssh.FingerprintSHA256(s.PublicKey())
+		if fp == key {
 			signer = ss
-			break
+		}
+		if fp == bastionKey {
+			bastionSigner = ss
 		}
 		// For backwards compatibility, also accept a hex-encoded SHA-256 hash
 		// of the public key, which is what -key used to be.
@@ -204,7 +216,9 @@ func connectToSSHAgent(sshAgent string, key string) *signer {
 		h := hex.EncodeToString(hh[:])
 		if h == key {
 			signer = ss
-			break
+		}
+		if h == bastionKey {
+			bastionSigner = ss
 		}
 		keys = append(keys, h)
 	}
@@ -212,7 +226,13 @@ func connectToSSHAgent(sshAgent string, key string) *signer {
 		fatal("ssh-agent does not contain Ed25519 key", "expected", key, "found", keys)
 	}
 	slog.Info("found key", "fingerprint", key)
-	return signer
+	if bastionKey != "" {
+		if bastionSigner == nil {
+			fatal("ssh-agent does not contain Ed25519 bastion key", "expected", key, "found", keys)
+		}
+		slog.Info("found bastion key", "fingerprint", bastionKey)
+	}
+	return bastionSigner, signer
 }
 
 type signer struct {
