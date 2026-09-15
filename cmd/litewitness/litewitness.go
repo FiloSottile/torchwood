@@ -38,16 +38,6 @@ import (
 	"filippo.io/torchwood/internal/witness"
 )
 
-var nameFlag = flag.String("name", "", "URL-like (e.g. example.com/foo) name of this witness")
-var dbFlag = flag.String("db", "litewitness.db", "path to sqlite database")
-var sshAgentFlag = flag.String("ssh-agent", "litewitness.sock", "path to ssh-agent socket")
-var listenFlag = flag.String("listen", "localhost:7380", "address to listen for HTTP requests")
-var noListenFlag = flag.Bool("no-listen", false, "do not open any listening socket, rely exclusively on bastions")
-var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of the witness key")
-var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
-var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
-var listenMetricsFlag = flag.String("listen-metrics", "", "address to listen for metrics requests, instead of exposing them on the main listener")
-
 type ConnectionSet struct {
 	connections map[string]func() // connection => cancel func
 	connect     func(context.Context, string)
@@ -102,6 +92,15 @@ func onSignal(signo os.Signal, callback func()) {
 }
 
 func main() {
+	var nameFlag = flag.String("name", "", "URL-like (e.g. example.com/foo) name of this witness")
+	var dbFlag = flag.String("db", "litewitness.db", "path to sqlite database")
+	var sshAgentFlag = flag.String("ssh-agent", "litewitness.sock", "path to ssh-agent socket")
+	var listenFlag = flag.String("listen", "localhost:7380", "address to listen for HTTP requests")
+	var noListenFlag = flag.Bool("no-listen", false, "do not open any listening socket, rely exclusively on bastions")
+	var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of the witness key")
+	var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
+	var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
+	var listenMetricsFlag = flag.String("listen-metrics", "", "address to listen for metrics requests, instead of exposing them on the main listener")
 	flag.Parse()
 
 	var level = new(slog.LevelVar)
@@ -119,7 +118,7 @@ func main() {
 		}
 	})
 
-	signer := connectToSSHAgent()
+	signer := connectToSSHAgent(*sshAgentFlag, *keyFlag)
 	bastionCertX509, err := selfSignedCertificate(signer)
 	if err != nil {
 		fatal("generating self-signed certificate", "err", err)
@@ -173,7 +172,7 @@ func main() {
 	mux.Handle("/", w)
 	if !*obscurityFlag {
 		mux.Handle("/logz", console)
-		mux.Handle("/{$}", indexHandler(w))
+		mux.Handle("/{$}", indexHandler(w, *dbFlag, *nameFlag))
 		if *listenMetricsFlag == "" {
 			mux.Handle("/metrics", metricsHandler)
 		}
@@ -202,7 +201,7 @@ func main() {
 		retry := 0
 		for {
 			startTime := time.Now()
-			err := connectToBastion(ctx, addr, bastionCert, srv)
+			err := connectToBastion(ctx, addr, *testCertFlag, bastionCert, srv)
 			duration := time.Since(startTime)
 			slog.Warn("bastion connection failed", "bastion", addr, "duration", duration, "err", err)
 
@@ -277,8 +276,8 @@ func main() {
 	}
 }
 
-func connectToSSHAgent() *signer {
-	conn, err := net.Dial("unix", *sshAgentFlag)
+func connectToSSHAgent(sshAgent string, key string) *signer {
+	conn, err := net.Dial("unix", sshAgent)
 	if err != nil {
 		fatal("dialing ssh-agent", "err", err)
 	}
@@ -287,7 +286,7 @@ func connectToSSHAgent() *signer {
 	if err != nil {
 		fatal("getting keys from ssh-agent", "err", err)
 	}
-	slog.Info("connected to ssh-agent", "addr", *sshAgentFlag)
+	slog.Info("connected to ssh-agent", "addr", sshAgent)
 	var signer *signer
 	var keys []string
 	for _, s := range signers {
@@ -298,7 +297,7 @@ func connectToSSHAgent() *signer {
 		if err != nil {
 			fatal("new signer", "err", err)
 		}
-		if ssh.FingerprintSHA256(s.PublicKey()) == *keyFlag {
+		if ssh.FingerprintSHA256(s.PublicKey()) == key {
 			signer = ss
 			break
 		}
@@ -306,16 +305,16 @@ func connectToSSHAgent() *signer {
 		// of the public key, which is what -key used to be.
 		hh := sha256.Sum256(ss.Public().(ed25519.PublicKey))
 		h := hex.EncodeToString(hh[:])
-		if h == *keyFlag {
+		if h == key {
 			signer = ss
 			break
 		}
 		keys = append(keys, h)
 	}
 	if signer == nil {
-		fatal("ssh-agent does not contain Ed25519 key", "expected", *keyFlag, "found", keys)
+		fatal("ssh-agent does not contain Ed25519 key", "expected", key, "found", keys)
 	}
-	slog.Info("found key", "fingerprint", *keyFlag)
+	slog.Info("found key", "fingerprint", key)
 	return signer
 }
 
@@ -376,9 +375,9 @@ pre {
 <pre>
 `
 
-func indexHandler(w *witness.Witness) http.HandlerFunc {
+func indexHandler(w *witness.Witness, dbPath string, name string) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		db, err := witness.OpenDB(*dbFlag)
+		db, err := witness.OpenDB(dbPath)
 		if err != nil {
 			http.Error(rw, "internal error", http.StatusInternalServerError)
 			return
@@ -387,7 +386,7 @@ func indexHandler(w *witness.Witness) http.HandlerFunc {
 
 		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(rw, indexHeader)
-		fmt.Fprintf(rw, "# litewitness %s\n\n", html.EscapeString(*nameFlag))
+		fmt.Fprintf(rw, "# litewitness %s\n\n", html.EscapeString(name))
 		fmt.Fprintf(rw, "%s\n\n", html.EscapeString(w.VerifierKey()))
 		fmt.Fprintf(rw, "## Logs\n\n")
 		sqlitex.Execute(db, "SELECT origin, tree_size, tree_hash FROM log", &sqlitex.ExecOptions{
@@ -403,12 +402,12 @@ func indexHandler(w *witness.Witness) http.HandlerFunc {
 
 var errBastionDisconnected = errors.New("connection to bastion interrupted")
 
-func connectToBastion(ctx context.Context, bastion string, cert tls.Certificate, srv *http.Server) error {
+func connectToBastion(ctx context.Context, bastion string, testCert bool, cert tls.Certificate, srv *http.Server) error {
 	slog.Info("connecting to bastion", "bastion", bastion)
 	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var roots *x509.CertPool
-	if *testCertFlag {
+	if testCert {
 		roots = x509.NewCertPool()
 		root, err := os.ReadFile("rootCA.pem")
 		if err != nil {
