@@ -36,14 +36,16 @@ lines. It does not need to be where the witness is reachable but should be
 recognizable.
 
     -key string
-            SSH fingerprint (with SHA256: prefix) of the witness key
+            SSH fingerprint (with SHA256: prefix) of a witness key, Ed25519
+            or ML-DSA-44. Can be used several times.
     -ssh-agent string
             path to ssh-agent socket (default "litewitness.sock")
 
-The witness Ed25519 private key is provided by a ssh-agent instance. The socket
-is specified explicitly because it's recommended that a dedicated instance is
-run for litewitness. The use of the ssh-agent protocol allows the key to be
-provided by a key file, a PKCS#11 module, or custom hardware agents.
+Witness private keys (Ed25519 or ML-DSA-44 algorithms) are provided by an
+ssh-agent instance. The socket is specified explicitly because it's recommended
+that a dedicated instance is run for litewitness. The use of the ssh-agent
+protocol allows the key to be provided by a key file, a PKCS#11 module, or
+custom hardware agents.
 
 Example of starting a dedicated ssh-agent and loading a key:
 

@@ -79,6 +79,7 @@ func main() {
 	}
 	pkHash := sigsum.HashBytes(ss.PublicKey().(ssh.CryptoPublicKey).CryptoPublicKey().(ed25519.PublicKey))
 	fmt.Printf("- witness key hash: %s\n", hex.EncodeToString(pkHash[:]))
+	fmt.Printf("- witness key SSH Fingerprint: %s\n", ssh.FingerprintSHA256(ss.PublicKey()))
 	fmt.Printf("- witness key: %x\n", witKey)
 	pemKey, err := ssh.MarshalPrivateKey(witKey, "")
 	if err != nil {
