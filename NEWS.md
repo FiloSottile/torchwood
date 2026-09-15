@@ -9,6 +9,11 @@
   This means you must add `-bastion-key` flag to the command-line, but you
   may set it to the same key (fingerprint) as the witness key.
 
+- Added support for passing the -key flag several times, allowing for
+  making multiple cosignatures.
+
+- Added support for ML-DSA-44 keys.
+
 ### mpt
 
 - New package with a Merkle Patricia Trie implementation.
