@@ -498,7 +498,13 @@ func (r *reader) readFrameHeader() (id [16]byte, seq uint64, n int, err error) {
 // storing the data into data.
 // If data is not large enough to hold the framed data,
 // readFrame returns errCorrupt.
-func (r *reader) readFrame(data []byte) (int, error) {
+func (r *reader) readFrame(data []byte) (n int, err error) {
+	defer func(startOff int64) {
+		if err != nil {
+			r.off = startOff
+		}
+	}(r.off)
+
 	id, seq, n, err := r.readFrameHeader()
 	if err != nil {
 		return 0, err
@@ -506,13 +512,13 @@ func (r *reader) readFrame(data []byte) (int, error) {
 	if id != r.id || seq != r.seq || n > len(data) {
 		return 0, errCorrupt
 	}
-	if _, err := r.file.ReadAt(data[:n], r.off); err != nil {
+	if _, err = r.file.ReadAt(data[:n], r.off); err != nil {
 		return 0, err
 	}
 	r.off += int64(n)
 	r.hash.Write(data[:n])
 	fsum := r.tmp[:hashSize]
-	if _, err := r.file.ReadAt(fsum, r.off); err != nil {
+	if _, err = r.file.ReadAt(fsum, r.off); err != nil {
 		return 0, err
 	}
 	r.off += int64(len(fsum))

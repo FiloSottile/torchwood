@@ -8,6 +8,8 @@ package pmem
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -283,6 +285,117 @@ func TestWriteAfterOpen(t *testing.T) {
 	check(t, m2.UnsafeUnmap())
 }
 
+func TestWriteAfterRecoveryFromCorruptedFrame(t *testing.T) {
+	oldMem := maxMem
+	defer func() {
+		maxMem = oldMem
+	}()
+	maxMem = 1 << 20
+
+	fakeHeader := func(id [16]byte, seq uint64, n int) []byte {
+		var hdr [frameSize]byte
+		copy(hdr[frameID:], id[:])
+		binary.BigEndian.PutUint64(hdr[frameSeq:], seq)
+		binary.BigEndian.PutUint64(hdr[frameLen:], uint64(n))
+		return hdr[:]
+	}
+
+	for _, tc := range []struct {
+		name    string
+		corrupt func(f *testFile, id [16]byte)
+	}{
+		{
+			name: "bad_checksum",
+			corrupt: func(f *testFile, id [16]byte) {
+				f.data = append(f.data, fakeHeader(id, 1, 4)...)
+				f.data = append(f.data, []byte("junk")...)
+				f.data = append(f.data, make([]byte, hashSize)...)
+			},
+		},
+		{
+			name: "mismatched_id_header",
+			corrupt: func(f *testFile, id [16]byte) {
+				var badID [16]byte
+				for i := range badID {
+					badID[i] = 0xff
+				}
+				f.data = append(f.data, fakeHeader(badID, 1, 0)...)
+			},
+		},
+		{
+			name: "truncated_payload",
+			corrupt: func(f *testFile, id [16]byte) {
+				f.data = append(f.data, fakeHeader(id, 1, 100)...)
+				f.data = append(f.data, make([]byte, 10)...)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tt := &tester{t: t}
+			for i := range tt.file {
+				tt.file[i].tester = tt
+			}
+			tt.disk.tester = tt
+			tt.disk.isDisk = true
+
+			m, err := Create("magic", &tt.file[0], &tt.file[1], &tt.disk)
+			check(t, err)
+			tt.setMem(m)
+			createdID := m.id
+
+			// Expand memory to 4096 bytes so that file write offset remains
+			// well below 2*len(mem) across both writes. This prevents compaction
+			// from triggering during Sync, ensuring the test verifies recovery
+			// and subsequent writes within the same file generation.
+			const memSize = 4096
+			_, err = m.Expand(memSize)
+			check(t, err)
+
+			first := []byte("first valid write before crash")
+			check(t, m.Mutate(m.Data()[:len(first)], first))
+			check(t, m.Sync())
+			check(t, m.Release())
+			check(t, m.UnsafeUnmap())
+
+			// Inject corruption at the end of the active file (file[0]).
+			tc.corrupt(&tt.file[0], createdID)
+
+			// Open after crash.
+			m, err = Open("magic", &tt.file[0], &tt.file[1], &tt.disk)
+			check(t, err)
+			tt.setMem(m)
+			if m.id != createdID {
+				t.Errorf("opened ID %x != created ID %x", m.id, createdID)
+			}
+			if !bytes.Equal(m.Data()[:len(first)], first) {
+				t.Fatalf("opened data %q, want %q", m.Data()[:len(first)], first)
+			}
+
+			// Write new frame after recovery.
+			second := []byte("second write after recovery that must survive")
+			check(t, m.Mutate(m.Data()[:len(second)], second))
+			check(t, m.Sync())
+			check(t, m.Release())
+			check(t, m.UnsafeUnmap())
+
+			// Reopen again and verify the second write was not lost.
+			diskClone := tt.disk.clone()
+			diskClone.tester = tt // writable, for patch replay
+			diskClone.isDisk = true
+			m2, err := Open("magic", tt.file[0].clone(), tt.file[1].clone(), diskClone)
+			check(t, err)
+			if m2.id != createdID {
+				t.Errorf("reopened ID %x != created ID %x", m2.id, createdID)
+			}
+			if !bytes.Equal(m2.Data()[:len(second)], second) {
+				t.Fatalf("reopened data after recovery %q, want %q", m2.Data()[:len(second)], second)
+			}
+			check(t, m2.Release())
+			check(t, m2.UnsafeUnmap())
+		})
+	}
+}
+
 func randFill(b []byte) []byte {
 	for i := range b {
 		b[i] = byte(rand.N(256))
@@ -527,8 +640,36 @@ func (tt *tester) reopen(format string, args ...any) {
 		}
 	}
 
+	// Check that the writer resumes exactly at the end of the last
+	// readable frame. Recovery stops at the first frame it cannot read,
+	// and new frames must overwrite that frame rather than be appended
+	// after it, where a later Open would never see them.
+	if end := frameEnd(mem.magic, mem.current.file); end != mem.current.off {
+		tt.t.Fatalf("reopen (%d %d): %s: frames end at %#x but writer is at %#x\n\n%s\n\n%s", len(tt.file[0].data), len(tt.file[1].data), kind, end, mem.current.off, debug.Stack(), hex.Dump(mem.current.file.(*testFile).data))
+	}
 	check(tt.t, mem.Release())
 	check(tt.t, mem.UnsafeUnmap())
+}
+
+// frameEnd returns the offset in file just past the last frame
+// that a reader can read, having read the memory image frame
+// and then patch frames until one cannot be read.
+func frameEnd(magic string, file File) int64 {
+	r := &reader{file: file, hash: sha256.New(), off: int64(len(magic))}
+	var err error
+	r.id, r.seq, r.memLen, err = r.readFrameHeader()
+	if err != nil {
+		return int64(len(magic))
+	}
+	r.off = int64(len(magic))
+	buf := make([]byte, max(r.memLen, maxPatch))
+	end := r.off
+	for {
+		if _, err := r.readFrame(buf); err != nil {
+			return end
+		}
+		end = r.off
+	}
 }
 
 func check(t *testing.T, err error) {
