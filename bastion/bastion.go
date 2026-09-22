@@ -81,6 +81,7 @@ func New(c *Config) (*Bastion, error) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "https" // needed for the required :scheme header
 			pr.Out.Host = pr.In.Context().Value(backendContextKey{}).(string)
+			pr.Out.URL.Host = pr.Out.Host
 			pr.SetXForwarded()
 			// We don't interpret the query, so pass it on unmodified.
 			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
