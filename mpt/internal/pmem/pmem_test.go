@@ -12,11 +12,23 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"runtime"
 	"runtime/debug"
 	"testing"
 )
 
+// skipIfRaceDarwin skips tests that reopen memory images many times. Each
+// open reserves a large address space span, and on macOS these collide with
+// the race detector's fixed heap layout, crashing the runtime with "too many
+// address space collisions for -race mode".
+func skipIfRaceDarwin(t *testing.T) {
+	if raceEnabled && runtime.GOOS == "darwin" {
+		t.Skip("skipping under the race detector on macOS")
+	}
+}
+
 func TestRecovery(t *testing.T) {
+	skipIfRaceDarwin(t)
 	for i := range 10 {
 		t.Run(fmt.Sprint(i), testRecovery)
 	}
@@ -116,6 +128,7 @@ func testRecovery(t *testing.T) {
 }
 
 func TestDiskSizeAfterCompaction(t *testing.T) {
+	skipIfRaceDarwin(t)
 	oldPatch := maxPatch
 	oldMem := maxMem
 	defer func() {
@@ -190,6 +203,7 @@ func TestDiskSizeAfterCompaction(t *testing.T) {
 }
 
 func TestWriteAfterOpen(t *testing.T) {
+	skipIfRaceDarwin(t)
 	tt := &tester{t: t}
 	for i := range tt.file {
 		tt.file[i].tester = tt
