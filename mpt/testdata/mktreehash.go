@@ -85,7 +85,7 @@ func bytesCompareKeyVal(a, b mpt.KeyVal) int {
 // computeHash sorts key-value pairs by key and computes the tree hash.
 func computeHash(kvs []mpt.KeyVal) mpt.Hash {
 	kvs = slices.Clone(kvs)
-	slices.SortFunc(kvs, mpt.KeyVal.Compare)
+	slices.SortFunc(kvs, mpt.KeyVal.CompareKey)
 	return mpt.TreeHash(slices.Values(kvs))
 }
 
