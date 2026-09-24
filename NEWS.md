@@ -1,5 +1,11 @@
 ## Unreleased
 
+### mpt
+
+- New package with a Merkle Patricia Trie implementation.
+
+## v0.10.0
+
 - Dependencies were upgraded.
 
 ### torchwood
@@ -19,10 +25,6 @@
 
 - Added `NewLogVerifier` to parse a log vkey, accepting regular Ed25519 keys
   and ML-DSA-44 cosignature keys.
-
-### mpt
-
-- New package with a Merkle Patricia Trie implementation.
 
 ### litewitness
 
