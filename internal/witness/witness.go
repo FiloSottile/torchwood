@@ -24,7 +24,7 @@ import (
 )
 
 type Witness struct {
-	s       *torchwood.CosignatureSigner
+	signers []*torchwood.CosignatureSigner
 	mux     *http.ServeMux
 	log     *slog.Logger
 	metrics metrics
@@ -65,20 +65,24 @@ func OpenDB(dbPath string) (*sqlite.Conn, error) {
 	`)
 }
 
-func NewWitness(dbPath, name string, key crypto.Signer, log *slog.Logger) (*Witness, error) {
+func NewWitness(dbPath, name string, keys []crypto.Signer, log *slog.Logger) (*Witness, error) {
 	db, err := OpenDB(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("initializing database: %v", err)
 	}
 
-	s, err := torchwood.NewCosignatureSigner(name, key)
-	if err != nil {
-		return nil, fmt.Errorf("preparing signer: %v", err)
+	var cosigners []*torchwood.CosignatureSigner
+	for i := range keys {
+		s, err := torchwood.NewCosignatureSigner(name, keys[i])
+		if err != nil {
+			return nil, fmt.Errorf("preparing signer: %w", err)
+		}
+		cosigners = append(cosigners, s)
 	}
 
 	w := &Witness{
 		db:      db,
-		s:       s,
+		signers: cosigners,
 		log:     log,
 		metrics: initMetrics(),
 		mux:     http.NewServeMux(),
@@ -108,8 +112,12 @@ func (w *Witness) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	w.mux.ServeHTTP(rw, r)
 }
 
-func (w *Witness) VerifierKey() string {
-	return w.s.Verifier().String()
+func (w *Witness) VerifierKeys() []string {
+	vkeys := make([]string, len(w.signers))
+	for i := range w.signers {
+		vkeys[i] = w.signers[i].Verifier().String()
+	}
+	return vkeys
 }
 
 func (w *Witness) AllBastions() ([]string, error) {
@@ -156,7 +164,7 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cosig, err := w.processAddCheckpointRequest(body, ContextBastion(r.Context()))
+	cosigs, err := w.processAddCheckpointRequest(body, ContextBastion(r.Context()))
 	if err, ok := err.(*conflictError); ok {
 		rw.Header().Set("Content-Type", "text/x.tlog.size")
 		rw.WriteHeader(http.StatusConflict)
@@ -189,7 +197,7 @@ func (w *Witness) serveAddCheckpoint(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if _, err := rw.Write(cosig); err != nil {
+	if _, err := rw.Write(cosigs); err != nil {
 		w.log.DebugContext(r.Context(), "error writing response", "error", err)
 	}
 }
@@ -277,7 +285,11 @@ func (w *Witness) processAddCheckpointRequest(body []byte, bastion string) (cosi
 	if err := w.persistTreeHead(c.Origin, oldSize, c.N, c.Hash); err != nil {
 		return nil, err
 	}
-	signed, err := note.Sign(&note.Note{Text: n.Text}, w.s)
+	noteSigners := make([]note.Signer, len(w.signers))
+	for i, s := range w.signers {
+		noteSigners[i] = s
+	}
+	signed, err := note.Sign(&note.Note{Text: n.Text}, noteSigners...)
 	if err != nil {
 		return nil, err
 	}
