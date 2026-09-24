@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:build ignore
+
 // Package mpt implements a Merkle Patricia Tree.
 //
 // A Merkle Patricia Tree (MPT) is a map that stores key-value pairs, where
