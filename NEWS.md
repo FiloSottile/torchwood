@@ -26,6 +26,11 @@
 - Added `NewLogVerifier` to parse a log vkey, accepting regular Ed25519 keys
   and ML-DSA-44 cosignature keys.
 
+### addenda
+
+- New package implementing the digest indication format of
+  c2sp.org/tlog-addenda, with `AppendIndex` and `ParseIndex`.
+
 ### litewitness
 
 - The `-bastion` flag was removed. Configure per-log bastions instead, for

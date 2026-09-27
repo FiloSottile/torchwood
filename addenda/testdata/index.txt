@@ -1,0 +1,100 @@
+# Test vectors for the c2sp.org/tlog-addenda digest indication format.
+#
+# Each record is one entry and its expected parse result:
+#
+#   entry HEX       - the full entry bytes, including the trailing index
+#   digest HEX      - an expected resolved digest, one line per digest,
+#                     in index order (offset_0 first)
+#   expect ok       - ParseIndex should succeed and return exactly the
+#                     listed digests
+#   expect malformed - ParseIndex should return an error
+#
+# Hex may contain spaces and tabs for grouping; '' means empty.
+# Blank lines and lines beginning with # are ignored.
+#
+# Entry layout, for reference (read from the end, backwards):
+#
+#   <application content, including the digests> || offset_0 .. offset_{N-1} || N
+#
+# The final byte is the count N; the N*4 bytes before it are big-endian
+# offsets from the start of the entry; each names a 32-byte digest. Below,
+# entry hex is grouped as  <content> <offsets> <count>  to make this visible.
+
+
+# === No addenda ===
+
+# The minimal entry: no content, no digests, just the 0x00 count byte.
+entry 00
+expect ok
+
+# Application content followed by the single 0x00 count byte.
+entry deadbeef  00
+expect ok
+
+
+# === Single digest ===
+
+# Two bytes of application content, then a digest at offset 2.
+# offsets: 00000002 ; count: 01
+entry cafe\
+	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+	00000002  01
+digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expect ok
+
+
+# === Multiple digests ===
+
+# Content interleaves the digests: cafe, digest A at offset 2, beef,
+# digest B at offset 36 (0x24).
+# offsets: 00000002 00000024 ; count: 02
+entry cafe\
+	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+	beef\
+	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\
+	00000002 00000024  02
+digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+expect ok
+
+
+# === Digests read from within the application content ===
+
+# The entry body is 40 bytes of plain content (0x00..0x27). Two digests are
+# read out of it: one at offset 0, one at offset 8. They overlap each other
+# and restate no separate bytes -- the index points into the content rather
+# than appending copies of the digests. Overlapping offsets are valid.
+# offsets: 00000000 00000008 ; count: 02
+entry 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526 27\
+	00000000 00000008  02
+digest 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+digest 08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627
+expect ok
+
+
+# === Malformed: unreadable inputs ===
+
+# An empty entry has no count byte.
+entry ''
+expect malformed
+
+# The count byte says 2 (needs 8 offset bytes) but only one byte precedes it.
+entry aa  02
+expect malformed
+
+# Count 1, offset 0, but the 7-byte entry cannot hold a 32-byte digest there.
+entry cafe  00000000  01
+expect malformed
+
+# Count 1, offset 30 (0x1e) into a 40-byte body: the digest's 32 bytes
+# (30..62) overrun the end of the 45-byte entry.
+entry 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526 27\
+	0000001e  01
+expect malformed
+
+# Count 1, offset 5 into 32 bytes of content: the digest's 32 bytes (5..37)
+# fit the 37-byte entry, but only by reading the offset table and count byte
+# as digest bytes. Digests must lie within the application content.
+entry aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\
+	00000005  01
+expect malformed
