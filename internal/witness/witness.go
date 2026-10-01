@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -313,8 +314,14 @@ func (w *Witness) checkConsistency(origin string,
 	if knownSize != oldSize {
 		return &conflictError{knownSize}
 	}
+	if newSize == 0 && newHash != tlog.Hash(sha256.Sum256(nil)) {
+		return errProof
+	}
 	if oldSize == 0 {
-		// This is the first tree head for this log.
+		// The empty tree is consistent with any tree, without a proof.
+		if len(proof) != 0 {
+			return errProof
+		}
 		return nil
 	}
 	if err := tlog.CheckTree(proof, newSize, newHash, oldSize, oldHash); err != nil {
