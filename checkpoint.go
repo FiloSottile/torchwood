@@ -27,6 +27,7 @@ const maxCheckpointSize = 1e6
 //
 // It can be followed by extra extension lines.
 type Checkpoint struct {
+	// Origin identifies the log and must be between 1 and 255 bytes long.
 	Origin string
 	tlog.Tree
 
@@ -47,6 +48,9 @@ func ParseCheckpoint(text string) (Checkpoint, error) {
 	}
 
 	lines := strings.SplitN(text, "\n", 4)
+	if len(lines[0]) == 0 || len(lines[0]) > 255 {
+		return Checkpoint{}, errors.New("malformed checkpoint")
+	}
 
 	n, err := strconv.ParseInt(lines[1], 10, 64)
 	if err != nil || n < 0 || lines[1] != strconv.FormatInt(n, 10) {
