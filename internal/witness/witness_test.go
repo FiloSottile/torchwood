@@ -3,10 +3,13 @@ package witness
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -191,5 +194,82 @@ KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 	_, err = w.processAddCheckpointRequest(buf, "")
 	if err == nil || err != errBadRequest {
 		t.Fatal("checkpoint with too many proofs (>63) should have failed with bad request")
+	}
+}
+
+func TestZeroSize(t *testing.T) {
+	const origin = "example.com/log"
+	sk, vk, err := note.GenerateKey(rand.Reader, origin)
+	fatalIfErr(t, err)
+	signer, err := note.NewSigner(sk)
+	fatalIfErr(t, err)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	fatalIfErr(t, err)
+	emptyHash := tlog.Hash(merkle.HashEmptyTree())
+	leafHash := tlog.RecordHash([]byte("leaf"))
+	for _, tt := range []struct {
+		name                        string
+		knownSize, oldSize, newSize int64
+		hash                        tlog.Hash
+		proof                       tlog.TreeProof
+		status                      int
+	}{
+		{name: "empty tree", hash: emptyHash, status: http.StatusOK},
+		{name: "invalid empty root", hash: leafHash, status: http.StatusUnprocessableEntity},
+		{name: "zero empty root", status: http.StatusUnprocessableEntity},
+		{name: "empty tree with proof", hash: emptyHash, proof: tlog.TreeProof{leafHash}, status: http.StatusUnprocessableEntity},
+		{name: "first nonempty tree", newSize: 1, hash: leafHash, status: http.StatusOK},
+		{name: "first nonempty tree with proof", newSize: 1, hash: leafHash, proof: tlog.TreeProof{leafHash}, status: http.StatusUnprocessableEntity},
+		{name: "old size mismatch", knownSize: 1, newSize: 1, hash: leafHash, proof: tlog.TreeProof{leafHash}, status: http.StatusConflict},
+		{name: "old size greater than new", knownSize: 1, oldSize: 1, hash: emptyHash, status: http.StatusBadRequest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w, err := NewWitness(":memory:", "example.com/witness", key, slog.New(testLogHandler(t)))
+			fatalIfErr(t, err)
+			t.Cleanup(func() { w.Close() })
+			knownHash := emptyHash
+			if tt.knownSize != 0 {
+				knownHash = leafHash
+			}
+			fatalIfErr(t, sqlitexExec(w.db, "INSERT INTO log (origin, tree_size, tree_hash) VALUES (?, ?, ?)", nil, origin, tt.knownSize, knownHash))
+			fatalIfErr(t, sqlitexExec(w.db, "INSERT INTO key (origin, key) VALUES (?, ?)", nil, origin, vk))
+			text := fmt.Sprintf("%s\n%d\n%s\n", origin, tt.newSize, tt.hash)
+			signed, err := note.Sign(&note.Note{Text: text}, signer)
+			fatalIfErr(t, err)
+			var body bytes.Buffer
+			fmt.Fprintf(&body, "old %d\n", tt.oldSize)
+			for _, hash := range tt.proof {
+				fmt.Fprintf(&body, "%s\n", hash)
+			}
+			body.WriteByte('\n')
+			body.Write(signed)
+			// Repeat to also exercise an already cosigned empty checkpoint.
+			for range 2 {
+				rw := httptest.NewRecorder()
+				w.ServeHTTP(rw, httptest.NewRequest(http.MethodPost, "/add-checkpoint", bytes.NewReader(body.Bytes())))
+				wantStatus := tt.status
+				if tt.status == http.StatusOK && tt.newSize != 0 {
+					// Use the matching old size on the second submission.
+					body.Reset()
+					fmt.Fprintf(&body, "old %d\n\n%s", tt.newSize, signed)
+				}
+				if rw.Code != wantStatus {
+					t.Fatalf("status = %d, want %d: %s", rw.Code, wantStatus, rw.Body.String())
+				}
+				size, hash, err := w.getLog(origin)
+				fatalIfErr(t, err)
+				wantSize, wantHash := tt.knownSize, knownHash
+				if tt.status == http.StatusOK {
+					wantSize, wantHash = tt.newSize, tt.hash
+					_, err := note.Open(append(bytes.Clone(signed), rw.Body.Bytes()...), note.VerifierList(w.s.Verifier()))
+					fatalIfErr(t, err)
+				} else if bytes.Contains(rw.Body.Bytes(), []byte("— ")) {
+					t.Fatal("returned a cosignature on error")
+				}
+				if size != wantSize || hash != wantHash {
+					t.Fatalf("stored tree = (%d, %s), want (%d, %s)", size, hash, wantSize, wantHash)
+				}
+			}
+		})
 	}
 }
