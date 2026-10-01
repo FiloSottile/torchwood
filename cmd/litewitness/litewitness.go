@@ -4,11 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -16,12 +12,10 @@ import (
 	"html"
 	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"syscall"
 	"time"
 
@@ -30,66 +24,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
-	"golang.org/x/net/http2"
 	"zombiezen.com/go/sqlite"
 	"zombiezen.com/go/sqlite/sqlitex"
 
 	"filippo.io/torchwood/internal/slogconsole"
 	"filippo.io/torchwood/internal/witness"
 )
-
-var nameFlag = flag.String("name", "", "URL-like (e.g. example.com/foo) name of this witness")
-var dbFlag = flag.String("db", "litewitness.db", "path to sqlite database")
-var sshAgentFlag = flag.String("ssh-agent", "litewitness.sock", "path to ssh-agent socket")
-var listenFlag = flag.String("listen", "localhost:7380", "address to listen for HTTP requests")
-var noListenFlag = flag.Bool("no-listen", false, "do not open any listening socket, rely exclusively on bastions")
-var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of the witness key")
-var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
-var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
-var listenMetricsFlag = flag.String("listen-metrics", "", "address to listen for metrics requests, instead of exposing them on the main listener")
-
-type ConnectionSet struct {
-	connections map[string]func() // connection => cancel func
-	connect     func(context.Context, string)
-}
-
-func NewConnectionSet(connect func(context.Context, string)) *ConnectionSet {
-	return &ConnectionSet{
-		connections: make(map[string]func()),
-		connect:     connect,
-	}
-}
-
-func (s *ConnectionSet) Configure(ctx context.Context, addrs []string) {
-	slices.Sort(addrs)
-
-	// Disconnect addresses that have disappeared.
-	var toDelete []string
-	for addr, cancel := range s.connections {
-		if _, found := slices.BinarySearch(addrs, addr); !found {
-			cancel()
-			// Postpone delete, we can't delete while iterating over the map.
-			toDelete = append(toDelete, addr)
-		}
-	}
-	for _, addr := range toDelete {
-		delete(s.connections, addr)
-	}
-
-	// Connect new bastions.
-	for _, addr := range addrs {
-		if _, found := s.connections[addr]; found {
-			continue
-		}
-		// Quit early on cancel.
-		if ctx.Err() != nil {
-			break
-		}
-		connectionCtx, cancel := context.WithCancel(ctx)
-		s.connections[addr] = cancel
-		go s.connect(connectionCtx, addr)
-	}
-}
 
 func onSignal(signo os.Signal, callback func()) {
 	c := make(chan os.Signal, 1)
@@ -102,6 +42,16 @@ func onSignal(signo os.Signal, callback func()) {
 }
 
 func main() {
+	var nameFlag = flag.String("name", "", "URL-like (e.g. example.com/foo) name of this witness")
+	var dbFlag = flag.String("db", "litewitness.db", "path to sqlite database")
+	var sshAgentFlag = flag.String("ssh-agent", "litewitness.sock", "path to ssh-agent socket")
+	var listenFlag = flag.String("listen", "localhost:7380", "address to listen for HTTP requests")
+	var noListenFlag = flag.Bool("no-listen", false, "do not open any listening socket, rely exclusively on bastions")
+	var keyFlag = flag.String("key", "", "SSH fingerprint (with SHA256: prefix) of the witness key")
+	var bastionKeyFlag = flag.String("bastion-key", "", "SSH fingerprint (with SHA256: prefix) of key for authenticating with bastions")
+	var testCertFlag = flag.Bool("testcert", false, "use rootCA.pem for connections to the bastion")
+	var obscurityFlag = flag.Bool("obscurity", false, "enable obscurity mode (disable / and /logz endpoints)")
+	var listenMetricsFlag = flag.String("listen-metrics", "", "address to listen for metrics requests, instead of exposing them on the main listener")
 	flag.Parse()
 
 	var level = new(slog.LevelVar)
@@ -119,15 +69,7 @@ func main() {
 		}
 	})
 
-	signer := connectToSSHAgent()
-	bastionCertX509, err := selfSignedCertificate(signer)
-	if err != nil {
-		fatal("generating self-signed certificate", "err", err)
-	}
-	bastionCert := tls.Certificate{
-		Certificate: [][]byte{bastionCertX509},
-		PrivateKey:  signer,
-	}
+	bastionSigner, signer := connectToSSHAgent(*sshAgentFlag, *bastionKeyFlag, *keyFlag)
 
 	w, err := witness.NewWitness(*dbFlag, *nameFlag, signer, slog.Default())
 	if err != nil {
@@ -173,7 +115,7 @@ func main() {
 	mux.Handle("/", w)
 	if !*obscurityFlag {
 		mux.Handle("/logz", console)
-		mux.Handle("/{$}", indexHandler(w))
+		mux.Handle("/{$}", indexHandler(w, *dbFlag, *nameFlag))
 		if *listenMetricsFlag == "" {
 			mux.Handle("/metrics", metricsHandler)
 		}
@@ -188,52 +130,14 @@ func main() {
 	}
 	e := make(chan error, 1)
 
-	bastionSet := NewConnectionSet(func(ctx context.Context, addr string) {
-		var delays = []time.Duration{
-			100 * time.Millisecond,
-			1 * time.Second, 1 * time.Second, 1 * time.Second,
-			5 * time.Second, 15 * time.Second, 30 * time.Second,
-			1 * time.Minute,
-		}
-
-		// If a connection survives for resetRetryDelay, reset the retry delay.
-		const resetRetryDelay = 5 * time.Minute
-
-		retry := 0
-		for {
-			startTime := time.Now()
-			err := connectToBastion(ctx, addr, bastionCert, srv)
-			duration := time.Since(startTime)
-			slog.Warn("bastion connection failed", "bastion", addr, "duration", duration, "err", err)
-
-			// Quit early on cancel.
-			if ctx.Err() != nil {
-				return
-			}
-
-			// If the connection lasted long enough, reset the retry delay.
-			if duration >= resetRetryDelay {
-				retry = 0
-			}
-
-			// Wait before retrying.
-			var delay time.Duration
-			if retry < len(delays) {
-				delay = delays[retry]
-			} else {
-				delay = delays[len(delays)-1]
-			}
-			slog.Info("waiting before reconnecting to bastion", "bastion", addr, "delay", delay)
-			timer := time.NewTimer(delay)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return
-			case <-timer.C:
-			}
-			retry++
-		}
-	})
+	var bastionSet *ConnectionSet
+	if bastionSigner != nil {
+		bastionSet = NewConnectionSet(bastionConnectFunc(bastionSigner, *testCertFlag, srv))
+		slog.Info("bastion key", "fingerprint", fmt.Sprintf("%x", sha256.Sum256(bastionSigner.Public().(ed25519.PublicKey))))
+	} else {
+		bastionSet = NewConnectionSet(bastionNoKeyConnectFunc())
+		slog.Info("no bastion key is configured, connections to bastions will not be possible")
+	}
 
 	// Handle log-specific bastions.
 	logBastions, err := w.AllBastions()
@@ -277,8 +181,8 @@ func main() {
 	}
 }
 
-func connectToSSHAgent() *signer {
-	conn, err := net.Dial("unix", *sshAgentFlag)
+func connectToSSHAgent(sshAgent string, bastionKey string, key string) (*signer, *signer) {
+	conn, err := net.Dial("unix", sshAgent)
 	if err != nil {
 		fatal("dialing ssh-agent", "err", err)
 	}
@@ -287,7 +191,8 @@ func connectToSSHAgent() *signer {
 	if err != nil {
 		fatal("getting keys from ssh-agent", "err", err)
 	}
-	slog.Info("connected to ssh-agent", "addr", *sshAgentFlag)
+	slog.Info("connected to ssh-agent", "addr", sshAgent)
+	var bastionSigner *signer
 	var signer *signer
 	var keys []string
 	for _, s := range signers {
@@ -298,25 +203,36 @@ func connectToSSHAgent() *signer {
 		if err != nil {
 			fatal("new signer", "err", err)
 		}
-		if ssh.FingerprintSHA256(s.PublicKey()) == *keyFlag {
+		fp := ssh.FingerprintSHA256(s.PublicKey())
+		if fp == key {
 			signer = ss
-			break
+		}
+		if fp == bastionKey {
+			bastionSigner = ss
 		}
 		// For backwards compatibility, also accept a hex-encoded SHA-256 hash
 		// of the public key, which is what -key used to be.
 		hh := sha256.Sum256(ss.Public().(ed25519.PublicKey))
 		h := hex.EncodeToString(hh[:])
-		if h == *keyFlag {
+		if h == key {
 			signer = ss
-			break
+		}
+		if h == bastionKey {
+			bastionSigner = ss
 		}
 		keys = append(keys, h)
 	}
 	if signer == nil {
-		fatal("ssh-agent does not contain Ed25519 key", "expected", *keyFlag, "found", keys)
+		fatal("ssh-agent does not contain Ed25519 key", "expected", key, "found", keys)
 	}
-	slog.Info("found key", "fingerprint", *keyFlag)
-	return signer
+	slog.Info("found key", "fingerprint", key)
+	if bastionKey != "" {
+		if bastionSigner == nil {
+			fatal("ssh-agent does not contain Ed25519 bastion key", "expected", key, "found", keys)
+		}
+		slog.Info("found bastion key", "fingerprint", bastionKey)
+	}
+	return bastionSigner, signer
 }
 
 type signer struct {
@@ -376,9 +292,9 @@ pre {
 <pre>
 `
 
-func indexHandler(w *witness.Witness) http.HandlerFunc {
+func indexHandler(w *witness.Witness, dbPath string, name string) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		db, err := witness.OpenDB(*dbFlag)
+		db, err := witness.OpenDB(dbPath)
 		if err != nil {
 			http.Error(rw, "internal error", http.StatusInternalServerError)
 			return
@@ -387,7 +303,7 @@ func indexHandler(w *witness.Witness) http.HandlerFunc {
 
 		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(rw, indexHeader)
-		fmt.Fprintf(rw, "# litewitness %s\n\n", html.EscapeString(*nameFlag))
+		fmt.Fprintf(rw, "# litewitness %s\n\n", html.EscapeString(name))
 		fmt.Fprintf(rw, "%s\n\n", html.EscapeString(w.VerifierKey()))
 		fmt.Fprintf(rw, "## Logs\n\n")
 		sqlitex.Execute(db, "SELECT origin, tree_size, tree_hash FROM log", &sqlitex.ExecOptions{
@@ -399,71 +315,6 @@ func indexHandler(w *witness.Witness) http.HandlerFunc {
 			},
 		})
 	}
-}
-
-var errBastionDisconnected = errors.New("connection to bastion interrupted")
-
-func connectToBastion(ctx context.Context, bastion string, cert tls.Certificate, srv *http.Server) error {
-	slog.Info("connecting to bastion", "bastion", bastion)
-	dialCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var roots *x509.CertPool
-	if *testCertFlag {
-		roots = x509.NewCertPool()
-		root, err := os.ReadFile("rootCA.pem")
-		if err != nil {
-			fatal("reading test root", "err", err)
-		}
-		roots.AppendCertsFromPEM(root)
-	}
-	conn, err := (&tls.Dialer{
-		Config: &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
-			MaxVersion:   tls.VersionTLS13,
-			NextProtos:   []string{"bastion/0"},
-			RootCAs:      roots,
-		},
-	}).DialContext(dialCtx, "tcp", bastion)
-	if err != nil {
-		slog.Info("connecting to bastion failed", "bastion", bastion, "err", err)
-		return fmt.Errorf("connecting to bastion: %v", err)
-	}
-	// Ensure that the connection is closed when our context is cancelled.
-	ctx, cancel = context.WithCancel(ctx)
-	defer cancel()
-	go func(ctx context.Context) {
-		// TODO: gracefully complete in-flight requests.
-		<-ctx.Done()
-		conn.Close()
-	}(ctx)
-
-	slog.Info("connected to bastion", "bastion", bastion)
-	ctx = witness.ContextWithBastion(ctx, bastion)
-	// TODO: find a way to surface the fatal error, especially since with
-	// TLS 1.3 it might be that the bastion rejected the client certificate.
-	(&http2.Server{
-		CountError: func(errType string) {
-			slog.Debug("HTTP/2 server error", "type", errType)
-		},
-	}).ServeConn(conn, &http2.ServeConnOpts{
-		Context:    ctx,
-		BaseConfig: srv,
-		Handler:    srv.Handler,
-	})
-	return errBastionDisconnected
-}
-
-func selfSignedCertificate(key crypto.Signer) ([]byte, error) {
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "litewitness"},
-		NotBefore:    time.Now().Add(-1 * time.Hour),
-		NotAfter:     time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}
-	return x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 }
 
 func fatal(msg string, args ...any) {
