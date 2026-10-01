@@ -1,0 +1,68 @@
+# gentest seed 9a6c50431f1e74895501fa9efb877e70657f19878ebbab14730755b94d9bd397
+# witness_key2 seed b2078997d35ae5bd202f4ff5a675518e466e8b7e6c01ba48fd8e19097798dc13
+
+# set up log
+exec witnessctl add-sigsum-log -key=52c05edad1bf5feffa81354faae59a655d9a9a1a793ed2f62c39c26c0be2aecd
+
+# start ssh-agent
+env SSH_AUTH_SOCK=$WORK/s # barely below the max path length
+! exec ssh-agent -a $SSH_AUTH_SOCK -D & # ssh-agent always exits 2
+waitfor $SSH_AUTH_SOCK
+chmod 600 witness_key.pem
+exec ssh-add witness_key.pem
+chmod 600 witness_key2.pem
+exec ssh-add witness_key2.pem
+
+# start litewitness
+exec litewitness -listen=localhost:7383 -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -key SHA256:8p25WQhnqHBihn+mIjp072aw0WpE9qw7xgW3uRsPSHo -key SHA256:kaKBbFZ2A0eUEe4SOXjuVuh5VEBQlDdIznSf/nEWdH0 &litewitness&
+waitfor localhost:7383
+
+# add-checkpoint
+exec hurl --very-verbose --test --error-format long add-checkpoint.hurl
+
+# check that litewitness shut down cleanly
+killall
+wait litewitness
+stderr 'shutting down'
+
+# witnessctl list-logs
+exec witnessctl list-logs
+stdout sigsum.org/v1/tree/985ea163f5af026723561354f51f2ebcdcf2af809ce254ccfb64aa9aadd80f90
+stdout "size":1
+
+
+-- witness_key.pem --
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACBepuSJDg/nQ3lTjGcO6pMAP4+Q9OxylLGlb42KMoMewgAA
+AIivUhPjr1IT4wAAAAtzc2gtZWQyNTUxOQAAACBepuSJDg/nQ3lTjGcO6pMAP4+Q
+9OxylLGlb42KMoMewgAAAEDJ2D6B6se728x+HB3gS+n6t3nvMRsNV1aI/N0bRfNI
+eF6m5IkOD+dDeVOMZw7qkwA/j5D07HKUsaVvjYoygx7CAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+
+
+-- witness_key2.pem --
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz
+c2gtZWQyNTUxOQAAACA6xY+NA2xZxCykI/MGEkVJUmTaDQ0MfSPiVwYWCUhbwgAA
+AIjVS1YJ1UtWCQAAAAtzc2gtZWQyNTUxOQAAACA6xY+NA2xZxCykI/MGEkVJUmTa
+DQ0MfSPiVwYWCUhbwgAAAEBeS+OFJXgL+9Ojs/gymYDNC0hYFmPnYGcYa8ehTalN
+tTrFj40DbFnELKQj8wYSRUlSZNoNDQx9I+JXBhYJSFvCAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----
+
+
+-- add-checkpoint.hurl --
+POST http://localhost:7383/add-checkpoint
+```
+old 0
+
+sigsum.org/v1/tree/985ea163f5af026723561354f51f2ebcdcf2af809ce254ccfb64aa9aadd80f90
+1
+KgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+— sigsum.org/v1/tree/985ea163f5af026723561354f51f2ebcdcf2af809ce254ccfb64aa9aadd80f90 7BKT0gOfNZ1J0So9unY3BZtm2YkPIoNYM/dce0Z2avJDs8dxN6ts9bOSwwrVrbjm6P9K3ZxpK6jJngOG6YvGGzV/lwo=
+```
+HTTP 200
+[Asserts]
+# Ensure we have 2 cosignatures from the witness:
+body matches "— example\\.com/witness [^\\n]*\\n— example\\.com/witness [^\\n]*\\n"

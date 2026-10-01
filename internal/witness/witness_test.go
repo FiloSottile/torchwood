@@ -2,6 +2,7 @@ package witness
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -24,7 +25,7 @@ func TestRace(t *testing.T) {
 	ss := ed25519.PrivateKey(mustDecodeHex(t,
 		"31ffc2116ecbe003acaa800ab70757bd7d53206e3febef6a6d0796d95530b34f"+
 			"64848ad8abed6e85981b3b3875b252b8767ebb4b02f703aca3b1e71bbd6a8e50"))
-	w, err := NewWitness(":memory:", "example.com", ss, slog.New(testLogHandler(t)))
+	w, err := NewWitness(":memory:", "example.com", []crypto.Signer{ss}, slog.New(testLogHandler(t)))
 	fatalIfErr(t, err)
 	t.Cleanup(func() { w.Close() })
 	pk := mustDecodeHex(t, "ffdc2d4d98e4124d3feaf788c0c2f9abfd796083d1f0495437f302ec79cf100f")
@@ -166,7 +167,7 @@ func TestTooManyProofs(t *testing.T) {
 	ss := ed25519.PrivateKey(mustDecodeHex(t,
 		"31ffc2116ecbe003acaa800ab70757bd7d53206e3febef6a6d0796d95530b34f"+
 			"64848ad8abed6e85981b3b3875b252b8767ebb4b02f703aca3b1e71bbd6a8e50"))
-	w, err := NewWitness(":memory:", "example.com", ss, slog.New(testLogHandler(t)))
+	w, err := NewWitness(":memory:", "example.com", []crypto.Signer{ss}, slog.New(testLogHandler(t)))
 	fatalIfErr(t, err)
 	t.Cleanup(func() { w.Close() })
 	origin := "sigsum.org/v1/tree/4d6d8825a6bb689d459628312889dfbb0bcd41b5211d9e1ce768b0ff0309e562"
@@ -224,7 +225,7 @@ func TestZeroSize(t *testing.T) {
 		{name: "old size greater than new", knownSize: 1, oldSize: 1, hash: emptyHash, status: http.StatusBadRequest},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			w, err := NewWitness(":memory:", "example.com/witness", key, slog.New(testLogHandler(t)))
+			w, err := NewWitness(":memory:", "example.com/witness", []crypto.Signer{key}, slog.New(testLogHandler(t)))
 			fatalIfErr(t, err)
 			t.Cleanup(func() { w.Close() })
 			knownHash := emptyHash
@@ -261,7 +262,11 @@ func TestZeroSize(t *testing.T) {
 				wantSize, wantHash := tt.knownSize, knownHash
 				if tt.status == http.StatusOK {
 					wantSize, wantHash = tt.newSize, tt.hash
-					_, err := note.Open(append(bytes.Clone(signed), rw.Body.Bytes()...), note.VerifierList(w.s.Verifier()))
+					noteVerifiers := make([]note.Verifier, len(w.signers))
+					for i := range w.signers {
+						noteVerifiers[i] = w.signers[i].Verifier()
+					}
+					_, err := note.Open(append(bytes.Clone(signed), rw.Body.Bytes()...), note.VerifierList(noteVerifiers...))
 					fatalIfErr(t, err)
 				} else if bytes.Contains(rw.Body.Bytes(), []byte("— ")) {
 					t.Fatal("returned a cosignature on error")

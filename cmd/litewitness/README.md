@@ -36,14 +36,16 @@ lines. It does not need to be where the witness is reachable but should be
 recognizable.
 
     -key string
-            SSH fingerprint (with SHA256: prefix) of the witness key
+            SSH fingerprint (with SHA256: prefix) of a witness key, Ed25519
+            or ML-DSA-44. Can be used several times.
     -ssh-agent string
             path to ssh-agent socket (default "litewitness.sock")
 
-The witness Ed25519 private key is provided by a ssh-agent instance. The socket
-is specified explicitly because it's recommended that a dedicated instance is
-run for litewitness. The use of the ssh-agent protocol allows the key to be
-provided by a key file, a PKCS#11 module, or custom hardware agents.
+Witness private keys (Ed25519 or ML-DSA-44 algorithms) are provided by an
+ssh-agent instance. The socket is specified explicitly because it's recommended
+that a dedicated instance is run for litewitness. The use of the ssh-agent
+protocol allows the key to be provided by a key file, a PKCS#11 module, or
+custom hardware agents.
 
 Example of starting a dedicated ssh-agent and loading a key:
 
@@ -56,13 +58,17 @@ SSH_AUTH_SOCK=litewitness.sock ssh-add litewitness.pem
             address to listen for HTTP requests (default "localhost:7380")
     -no-listen
             do not open any listening socket, rely exclusively on bastions
+    -bastion-key
+            SSH fingerprint (with SHA256: prefix) of key for authenticating with bastions
 
 The `-listen` flag will listen for HTTP requests on the specified port. (HTTPS
 needs to be terminated outside of litewitness.) Alternatively, `-no-listen` can
 be used to rely exclusively on per-log bastions, which are configured in the
 database with the `add-bastion`, `del-bastion`, and `set-bastions` witnessctl
 commands (see below) and cause litewitness to serve requests through a bastion
-reverse proxy.
+reverse proxy. litewitness does TLS client authentication with bastions using a
+certificate self-signed by a separate bastion-key (the witness key was
+previously used for this).
 
     -obscurity
             enable obscurity mode (disable / and /logz and /metrics endpoints)
