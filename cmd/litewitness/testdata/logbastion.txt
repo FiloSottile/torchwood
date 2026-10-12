@@ -17,7 +17,7 @@ chmod 600 witness_key.pem
 exec ssh-add witness_key.pem
 
 # start litewitness
-exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -testcert -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a -no-listen &litewitness&
+exec litewitness -ssh-agent=$SSH_AUTH_SOCK -name=example.com/witness -testcert -bastion-key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a -key=e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a -no-listen &litewitness&
 waitfor https://localhost:9443/e933707e0e36c30f01d94b5d81e742da373679d88eb0f85f959ccd80b83b992a/
 
 # add-checkpoint

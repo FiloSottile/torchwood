@@ -1,5 +1,19 @@
 ## Unreleased
 
+### litewitness
+
+- Added `-bastion-key` flag. The Ed25519 key used for authenticating with
+  bastion must now be configured separately, instead of the witness key being
+  reused for this. litewitness can be started and run with no bastion key
+  set, but any attempted bastion connection will cause errors to be logged.
+  This means you must add `-bastion-key` flag to the command-line, but you
+  may set it to the same key (fingerprint) as the witness key.
+
+- Added support for passing the -key flag several times, allowing for
+  making multiple cosignatures.
+
+- Added support for ML-DSA-44 keys.
+
 ### mpt
 
 - New package with a Merkle Patricia Trie implementation.
