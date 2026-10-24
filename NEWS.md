@@ -1,5 +1,14 @@
 ## Unreleased
 
+### torchwood
+
+- Added `CosignatureSigner.SignSubtreeRaw` and
+  `CosignatureVerifier.VerifySubtreeRaw`.
+
+- Deprecated `CosignatureSigner.SignSubtree` and
+  `CosignatureVerifier.VerifySubtree`, which use a note signature encoding that
+  is not well defined for subtree cosignatures.
+
 ### mpt
 
 - New package with a Merkle Patricia Trie implementation.

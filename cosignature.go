@@ -177,10 +177,16 @@ func (s *CosignatureSigner) Verifier() *CosignatureVerifier  { return &s.v }
 
 var _ note.Signer = &CosignatureSigner{}
 
-// SignSubtree signs a subtree [start, end) with the given hash for the log with
-// the given origin. The timestamp is set to zero. The returned signature is in
-// the format of a note signature, starting with the — and ending with a newline.
-func (s *CosignatureSigner) SignSubtree(origin string, start, end int64, hash tlog.Hash) ([]byte, error) {
+// SignSubtreeRaw produces a c2sp.org/tlog-cosignature subtree cosignature over
+// the subtree [start, end) with the given hash, for the log with the given
+// origin.
+//
+// The returned value is the raw signature, with no timestamp or key hash, as
+// used by c2sp.org/tlog-witness sign-subtree and by
+// draft-ietf-plants-merkle-tree-certs.
+//
+// Only ML-DSA-44 keys can produce subtree cosignatures.
+func (s *CosignatureSigner) SignSubtreeRaw(origin string, start, end int64, hash tlog.Hash) ([]byte, error) {
 	if _, ok := s.v.PublicKey().(*mldsa.PublicKey); !ok {
 		return nil, errors.New("subtree signatures are only supported for ML-DSA-44 keys")
 	}
@@ -193,7 +199,18 @@ func (s *CosignatureSigner) SignSubtree(origin string, start, end int64, hash tl
 		return nil, err
 	}
 
-	ss, err := s.key.Sign(nil, m, crypto.Hash(0))
+	return s.key.Sign(nil, m, crypto.Hash(0))
+}
+
+// SignSubtree signs a subtree [start, end) with the given hash for the log with
+// the given origin. The timestamp is set to zero. The returned signature is in
+// the format of a note signature, starting with the — and ending with a newline.
+//
+// Deprecated: subtree cosignatures are not note signatures, and the note
+// signature encoding of a subtree cosignature is not well defined. Use
+// [CosignatureSigner.SignSubtreeRaw] instead.
+func (s *CosignatureSigner) SignSubtree(origin string, start, end int64, hash tlog.Hash) ([]byte, error) {
+	ss, err := s.SignSubtreeRaw(origin, start, end, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -338,6 +355,16 @@ func (v *CosignatureVerifier) PublicKey() crypto.PublicKey {
 	return v.key
 }
 
+// VerifySubtreeRaw reports whether signature is a valid
+// c2sp.org/tlog-cosignature subtree cosignature by this verifier over the
+// subtree [start, end) with the given hash, for the log with the given origin.
+//
+// signature must be a raw signature, with no timestamp or key hash, like the
+// one returned by [CosignatureSigner.SignSubtreeRaw].
+func (v *CosignatureVerifier) VerifySubtreeRaw(origin string, start, end int64, hash tlog.Hash, signature []byte) bool {
+	return v.verifySubtree(0, origin, start, end, hash, signature)
+}
+
 // VerifySubtree reports whether signature is a valid cosignature by this
 // verifier over the subtree [start, end) with the given hash for the log with
 // the given origin.
@@ -348,15 +375,11 @@ func (v *CosignatureVerifier) PublicKey() crypto.PublicKey {
 //
 // Note that a checkpoint cosignature is a valid cosignature over the equivalent
 // subtree, and this method allows non-zero timestamps for root subtrees.
+//
+// Deprecated: subtree cosignatures are not note signatures, and the note
+// signature encoding of a subtree cosignature is not well defined. Use
+// [CosignatureVerifier.VerifySubtreeRaw] instead.
 func (v *CosignatureVerifier) VerifySubtree(origin string, start, end int64, hash tlog.Hash, signature []byte) bool {
-	k, ok := v.key.(*mldsa.PublicKey)
-	if !ok {
-		return false
-	}
-	if !ValidSubtree(start, end) {
-		return false
-	}
-
 	line, ok := strings.CutSuffix(string(signature), "\n")
 	if !ok {
 		return false
@@ -379,7 +402,23 @@ func (v *CosignatureVerifier) VerifySubtree(origin string, start, end int64, has
 		return false
 	}
 	t := binary.BigEndian.Uint64(sig)
-	sig = sig[8:]
+	return v.verifySubtree(t, origin, start, end, hash, sig[8:])
+}
+
+// verifySubtree reports whether sig is a valid ML-DSA-44 signature by this
+// verifier over the CosignedSubtree message with timestamp t for the subtree
+// [start, end) with the given hash, for the log with the given origin.
+func (v *CosignatureVerifier) verifySubtree(t uint64, origin string, start, end int64, hash tlog.Hash, sig []byte) bool {
+	k, ok := v.key.(*mldsa.PublicKey)
+	if !ok {
+		return false
+	}
+	if !ValidSubtree(start, end) {
+		return false
+	}
+	if len(sig) != mldsa.MLDSA44SignatureSize {
+		return false
+	}
 	// If start is not zero, the timestamp must be zero.
 	if t > math.MaxInt64 || (start != 0 && t != 0) {
 		return false

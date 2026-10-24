@@ -138,14 +138,19 @@ func genMLDSA(seed []byte) {
 	}
 	fmt.Printf("- log vkey: %s\n", signer.Verifier().String())
 
-	// SignSubtree is used to get a deterministic timestamp (zero).
+	// A subtree cosignature over [0, 1) is a checkpoint cosignature with a
+	// deterministic timestamp (zero).
 	rootHash := tlog.RecordHash([]byte("testonly"))
 	checkpoint := fmt.Sprintf("%s\n%d\n%s\n", origin, 1, base64.StdEncoding.EncodeToString(rootHash[:]))
-	sigLine, err := signer.SignSubtree(origin, 0, 1, rootHash)
+	rawSig, err := signer.SignSubtreeRaw(origin, 0, 1, rootHash)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("- checkpoint (size 1):\n%s\n%s", checkpoint, string(sigLine))
+	sig := binary.BigEndian.AppendUint32(nil, signer.KeyHash())
+	sig = binary.BigEndian.AppendUint64(sig, 0)
+	sig = append(sig, rawSig...)
+	sigLine := "— " + signer.Name() + " " + base64.StdEncoding.EncodeToString(sig) + "\n"
+	fmt.Printf("- checkpoint (size 1):\n%s\n%s", checkpoint, sigLine)
 }
 
 func noteKeyHash(name string, key []byte) uint32 {
