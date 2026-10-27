@@ -14,46 +14,62 @@ import (
 
 // A memTree is an in-memory [Tree].
 type memTree struct {
-	version int64    // version number of tree
-	exact   bool     // version is exact
-	root    *memNode // root node
-	hash    Hash     // overall tree hash
-	dirty   bool     // Set called without Snap
-	err     error    // sticky error condition
+	version int64  // version number of tree
+	exact   bool   // version is exact
+	root    memAny // tree root: nil, *memNode, or *memLeaf
+	hash    Hash   // overall tree hash
+	dirty   bool   // Set called without Snap
+	err     error  // sticky error condition
 }
 
-// A memNode is a single node in the in-memory tree.
+// A memAny is a tree position: a *memNode or a *memLeaf.
+type memAny interface {
+	// key and val return a representative key-value pair for the
+	// position: the position's own key and val if it is a *memLeaf,
+	// or otherwise the key and val of the leftmost leaf beneath it,
+	// which every other key beneath it agrees with on the bits
+	// leading down to the position.
+	key() Key
+	val() Val
+
+	// rehash returns the position's hash, recomputing and caching it
+	// first if it is a dirty *memNode.
+	rehash() Hash
+}
+
+// A memNode is a single inner node in the in-memory tree.
+//
+// Unlike in a standard Patricia tree implementation, a memNode is
+// never also one of its own two children: every leaf is referenced
+// directly, as a *memLeaf, by its parent's left or right field (or,
+// for a one-leaf tree, by the memTree's own root field), so a memNode
+// never needs to store leaf data of its own.
 type memNode struct {
-	key   Key
-	val   Val
-	ihash Hash
+	bit   int  // bit position deciding between left and right
 	dirty bool // needs rehashing
-	ubit  int
-	left  *memNode
-	right *memNode
+	ihash Hash
+	left  memAny
+	right memAny
 }
 
-func (n *memNode) bit() int {
-	if n.left == nil && n.right == nil {
-		return -1
-	}
-	return n.ubit
+// A memLeaf is a single leaf in the in-memory tree.
+type memLeaf struct {
+	k Key
+	v Val
 }
 
-// NewMemTree returns a new in-memory [Tree].
-func NewMemTree() Tree {
-	t := &memTree{
-		hash:  emptyTreeHash,
-		exact: true,
-	}
-	return t
-}
+func (l *memLeaf) key() Key     { return l.k }
+func (l *memLeaf) val() Val     { return l.v }
+func (l *memLeaf) rehash() Hash { return hashLeaf(l.k, l.v) }
 
-// hash returns the hash for the given tree node.
-// pbit is the parent bit depth, controlling whether n is viewed as a leaf.
-func (n *memNode) hash(pbit int) Hash {
-	if n.bit() <= pbit {
-		return hashLeaf(n.key, n.val)
+func (n *memNode) key() Key { return n.left.key() }
+func (n *memNode) val() Val { return n.left.val() }
+
+// rehash updates n.ihash if needed and then returns it.
+func (n *memNode) rehash() Hash {
+	if n.dirty {
+		n.ihash = hashInner(n.bit, n.left.rehash(), n.right.rehash())
+		n.dirty = false
 	}
 	return n.ihash
 }
@@ -63,17 +79,13 @@ func (n *memNode) unhash() {
 	n.dirty = true
 }
 
-// rehash updates n.hash if needed and then returns it.
-func (n *memNode) rehash(pbit int) Hash {
-	nbit := n.bit()
-	if nbit <= pbit {
-		return hashLeaf(n.key, n.val)
+// NewMemTree returns a new in-memory [Tree].
+func NewMemTree() Tree {
+	t := &memTree{
+		hash:  emptyTreeHash,
+		exact: true,
 	}
-	if n.dirty {
-		n.ihash = hashInner(nbit, n.left.rehash(nbit), n.right.rehash(nbit))
-		n.dirty = false
-	}
-	return n.ihash
+	return t
 }
 
 // Sync is a no-op since the data is only in memory.
@@ -110,7 +122,7 @@ func (t *memTree) Snap(version int64) (Snapshot, error) {
 		t.version = version
 	}
 	if t.root != nil {
-		t.hash = t.root.rehash(-1)
+		t.hash = t.root.rehash()
 		_ = t.check // t.check()
 	}
 	t.exact = true
@@ -124,63 +136,83 @@ func (t *memTree) Set(key Key, val Val) error {
 	}
 	t.dirty = true
 	t.exact = false
-	if t.root == nil {
-		t.root = &memNode{key: key, val: val}
-	} else {
-		if setChild(-1, &t.root, key, val) >= 0 {
-			panic("bad add")
-		}
+	if setChild(-1, &t.root, key, val) >= 0 {
+		panic("bad add")
 	}
 	_ = t.check // t.check()
 	return nil
 }
 
-func (n *memNode) set(pbit int, key Key, val Val) int {
-	if n.bit() <= pbit {
-		// view n as leaf
-		b := n.key.overlap(key)
+// setChild sets key to val within the subtree at *pos (nil, *memNode,
+// or *memLeaf). nbit is the bit position of whatever split routed the
+// caller to pos (-1 for the root): every key already in the subtree
+// is known to agree with key on bit nbit, if nbit >= 0, because that
+// decided the route, but not necessarily on any bit between nbit and
+// the subtree's own next split, if any.
+//
+// If key turns out to diverge from the whole subtree at some bit
+// b <= nbit — discovered by comparing against a leaf reached by
+// recursing further in, and only possible to learn that late — the
+// divergence in fact belongs at or above pos, not inside it, so
+// setChild leaves *pos untouched and returns b for an ancestor with a
+// shallower context to insert the split instead. It returns a
+// negative b once the update, including any such split, has been
+// fully applied, which may include rewriting *pos itself.
+func setChild(nbit int, pos *memAny, key Key, val Val) int {
+	switch p := (*pos).(type) {
+	case nil:
+		// Empty subtree, only possible for the root of an empty tree:
+		// the new key becomes the entire tree, as a single leaf.
+		*pos = &memLeaf{k: key, v: val}
+		return -1
+
+	case *memLeaf:
+		b := p.k.overlap(key)
 		if b == maxKeyBits {
-			n.val = val
+			// Same key: update the value in place.
+			p.v = val
 			return -1
 		}
-		// Caller must create a node splitting at bit b.
-		return b
-	}
+		if b <= nbit {
+			// The divergence belongs at or above our own context.
+			return b
+		}
+		// Different key, diverging strictly after nbit: split here,
+		// between the new key and the existing leaf.
+		*pos = split(b, key, val, p)
+		return -1
 
-	nbit := n.bit()
-	ptr := &n.left
-	if nbit >= 0 && key.bit(nbit) != 0 {
-		ptr = &n.right
+	case *memNode:
+		// p is a node: recurse into whichever child agrees with key so far.
+		child := &p.left
+		if key.bit(p.bit) != 0 {
+			child = &p.right
+		}
+		cb := setChild(p.bit, child, key, val)
+		if cb < 0 {
+			p.unhash()
+			return -1
+		}
+		if cb <= nbit {
+			return cb
+		}
+		// cb belongs strictly between nbit and p.bit: split here,
+		// replacing this whole subtree (p, unchanged) with the new split.
+		*pos = split(cb, key, val, p)
+		return -1
 	}
-	b := setChild(nbit, ptr, key, val)
-	if b < 0 {
-		n.unhash()
-	}
-	return b
+	panic("mpt: invalid tree position")
 }
 
-func setChild(nbit int, child **memNode, key Key, val Val) int {
-	b := (*child).set(nbit, key, val)
-	if nbit < b {
-		n := new(memNode)
-		var left, right *memNode
-		if key.bit(b) == 0 {
-			left, right = n, *child
-		} else {
-			left, right = *child, n
-		}
-		*n = memNode{
-			key:   key,
-			val:   val,
-			ubit:  b,
-			dirty: true,
-			left:  left,
-			right: right,
-		}
-		*child = n
-		b = -1
+// split returns a new node splitting at bit b between the existing
+// subtree p (a *memNode or *memLeaf) and a new leaf for key, val.
+func split(b int, key Key, val Val, p memAny) *memNode {
+	leaf := &memLeaf{k: key, v: val}
+	left, right := memAny(leaf), p
+	if key.bit(b) != 0 {
+		left, right = p, leaf
 	}
-	return b
+	return &memNode{bit: b, dirty: true, left: left, right: right}
 }
 
 // Predict returns the hash of the tree that would result from
@@ -197,53 +229,61 @@ func (t *memTree) Predict(changes []KeyVal) (Hash, error) {
 	if err := checkChanges(changes); err != nil {
 		return Hash{}, err
 	}
-	s, list := t.predict([]node{}, t.root, -1, changes)
+	s, list := predict([]node{}, t.root, changes)
 	for _, kv := range list {
 		s = reduce(append(s, node{prefix(kv.Key, maxKeyBits), hashLeaf(kv.Key, kv.Val)}))
 	}
 	return hashStack(s), nil
 }
 
-func (t *memTree) predict(s []node, n *memNode, pbit int, list []KeyVal) ([]node, []KeyVal) {
-	if n == nil {
+// predict calculates the edited tree hash for the subtree at pos.
+func predict(s []node, pos memAny, list []KeyVal) ([]node, []KeyVal) {
+	switch p := pos.(type) {
+	case nil:
 		return s, list
-	}
-	key, val := n.key, n.val
-	nbit := n.bit()
-	bits := nbit
-	if nbit <= pbit {
-		bits = maxKeyBits
-	}
-	pkey := prefix(key, bits)
 
-	// Stack modifications before node.
-	for len(list) > 0 && prefix(list[0].Key, bits).compare(pkey) < 0 {
-		k, v := list[0].Key, list[0].Val
-		list = list[1:]
-		s = reduce(append(s, node{prefix(k, maxKeyBits), hashLeaf(k, v)}))
-	}
+	case *memLeaf:
+		key, val := p.key(), p.val()
+		pkey := prefix(key, maxKeyBits)
 
-	// Stack leaf node, possibly replaced.
-	if bits == maxKeyBits {
+		// Stack modifications before leaf.
+		for len(list) > 0 && prefix(list[0].Key, maxKeyBits).compare(pkey) < 0 {
+			k, v := list[0].Key, list[0].Val
+			list = list[1:]
+			s = reduce(append(s, node{prefix(k, maxKeyBits), hashLeaf(k, v)}))
+		}
+
+		// Stack leaf, possibly replaced.
 		if len(list) > 0 && bytes.Equal(list[0].Key, key) {
 			val = list[0].Val
 			list = list[1:]
 		}
 		s = reduce(append(s, node{pkey, hashLeaf(key, val)}))
 		return s, list
-	}
 
-	// Stack entire subtree, if no modifications inside it.
-	if len(list) == 0 || pkey.compare(prefix(list[0].Key, bits)) < 0 {
-		h := n.hash(pbit)
-		s = reduce(append(s, node{pkey, h}))
+	case *memNode:
+		nbit := p.bit
+		pkey := prefix(p.key(), nbit)
+
+		// Stack modifications before node.
+		for len(list) > 0 && prefix(list[0].Key, nbit).compare(pkey) < 0 {
+			k, v := list[0].Key, list[0].Val
+			list = list[1:]
+			s = reduce(append(s, node{prefix(k, maxKeyBits), hashLeaf(k, v)}))
+		}
+
+		// Stack entire subtree, if no modifications inside it.
+		if len(list) == 0 || pkey.compare(prefix(list[0].Key, nbit)) < 0 {
+			s = reduce(append(s, node{pkey, p.rehash()}))
+			return s, list
+		}
+
+		// Otherwise, apply modifications within subtree.
+		s, list = predict(s, p.left, list)
+		s, list = predict(s, p.right, list)
 		return s, list
 	}
-
-	// Otherwise, apply modifications within subtree.
-	s, list = t.predict(s, n.left, nbit, list)
-	s, list = t.predict(s, n.right, nbit, list)
-	return s, list
+	panic("mpt: invalid tree position")
 }
 
 // Path returns the path proof for key in t.
@@ -254,40 +294,36 @@ func (t *memTree) Path(key Key) (Proof, error) {
 	if t.dirty {
 		return nil, ErrModifiedTree
 	}
-	if t.root == nil {
-		return Proof{}, nil
-	}
-	return t.root.path(-1, key), nil
+	return path(t.root, key), nil
 }
 
-// path returns the path proof for key in the subtree rooted at n.
-// pbit is the parent bit depth, controlling whether n is viewed as a leaf.
-func (n *memNode) path(pbit int, key Key) Proof {
-	nbit := n.bit()
-	if nbit <= pbit {
-		// view n as leaf
-		var p Proof
-		p = binary.AppendUvarint(p, uint64(len(n.key)))
-		p = append(p, n.key...)
-		p = binary.AppendUvarint(p, uint64(len(n.val)))
-		p = append(p, n.val...)
-		return p
-	}
+// path returns the path proof for key in the subtree at pos.
+func path(pos memAny, key Key) Proof {
+	switch p := pos.(type) {
+	case nil:
+		return Proof{}
 
-	var sib Hash
-	var child *memNode
-	if key.bit(nbit) == 0 {
-		child = n.left
-		sib = n.right.hash(nbit)
-	} else {
-		child = n.right
-		sib = n.left.hash(nbit)
-	}
+	case *memLeaf:
+		var proof Proof
+		proof = binary.AppendUvarint(proof, uint64(len(p.k)))
+		proof = append(proof, p.k...)
+		proof = binary.AppendUvarint(proof, uint64(len(p.v)))
+		proof = append(proof, p.v...)
+		return proof
 
-	proof := child.path(nbit, key)
-	proof = binary.AppendUvarint(proof, uint64(nbit))
-	proof = append(proof, sib[:]...)
-	return proof
+	case *memNode:
+		child, sib := p.left, p.right
+		if key.bit(p.bit) == 1 {
+			child, sib = sib, child
+		}
+		sibHash := sib.rehash()
+
+		proof := path(child, key)
+		proof = binary.AppendUvarint(proof, uint64(p.bit))
+		proof = append(proof, sibHash[:]...)
+		return proof
+	}
+	panic("mpt: invalid tree position")
 }
 
 // Scan returns an iterator over key-val pairs whose keys start with prefix.
@@ -297,90 +333,84 @@ func (t *memTree) Scan(prefix []byte) iter.Seq2[KeyVal, error] {
 			yield(KeyVal{}, t.err)
 			return
 		}
-		n, pbit := t.subtree(prefix)
-		if n == nil {
+		pos := subtree(t.root, prefix)
+		if pos == nil {
 			return
 		}
-		n.scan(pbit, yield)
+		scan(pos, yield)
 	}
 }
 
-// subtree returns the root of the subtree holding every key that starts
-// with prefix, along with its parent's bit depth, or nil if the tree
-// holds no such key.
-func (t *memTree) subtree(prefix []byte) (*memNode, int) {
-	n := t.root
-	if n == nil {
-		return nil, 0
+// subtree returns the tree position holding every key that starts
+// with prefix, or nil if the tree holds no such key.
+func subtree(pos memAny, prefix []byte) memAny {
+	if pos == nil {
+		return nil
 	}
 
-	// Look up prefix as if it were a key, stopping at the first node
-	// that splits at a bit index at or past the end of the prefix:
-	// every key below that node agrees with the others there,
-	// so either all of them start with prefix or none do.
+	// Look up prefix as if it were a key, stopping at the first leaf,
+	// or at the first node that splits at a bit index at or past the
+	// end of the prefix: every key below that point agrees with the
+	// others there, so either all of them start with prefix or none do.
 	pbits := 8 * len(prefix)
-	pbit := -1
-	for n.bit() > pbit && n.bit() < pbits {
-		nbit := n.bit()
-		if bit(prefix, nbit) == 0 {
-			n = n.left
-		} else {
-			n = n.right
+	for {
+		n, ok := pos.(*memNode)
+		if !ok || n.bit >= pbits {
+			break
 		}
-		pbit = nbit
+		pos = n.left
+		if bit(prefix, n.bit) != 0 {
+			pos = n.right
+		}
 	}
 
 	// Check one key to decide for all of them.
-	if !n.leftmost(pbit).key.HasPrefix(prefix) {
-		return nil, 0
+	if !pos.key().HasPrefix(prefix) {
+		return nil
 	}
-	return n, pbit
+	return pos
 }
 
-// leftmost returns the leaf holding the smallest key
-// in the subtree rooted at n.
-func (n *memNode) leftmost(pbit int) *memNode {
-	for n.bit() > pbit {
-		pbit = n.bit()
-		n = n.left
-	}
-	return n
-}
-
-// scan yields the key-val pairs in the subtree rooted at n, in key order,
+// scan yields the key-val pairs in the subtree at pos, in key order,
 // reporting whether iteration should continue.
-func (n *memNode) scan(pbit int, yield func(KeyVal, error) bool) bool {
-	nbit := n.bit()
-	if nbit <= pbit {
-		// view n as leaf
-		return yield(KeyVal{n.key, n.val}, nil)
+func scan(pos memAny, yield func(KeyVal, error) bool) bool {
+	switch p := pos.(type) {
+	case *memLeaf:
+		return yield(KeyVal{p.k, p.v}, nil)
+	case *memNode:
+		return scan(p.left, yield) && scan(p.right, yield)
 	}
-	return n.left.scan(nbit, yield) && n.right.scan(nbit, yield)
+	panic("mpt: invalid tree position")
 }
 
 // check checks all the tree invariants, walking the entire tree.
 // It is too slow for real use but helpful to insert when debugging.
 func (t *memTree) check() {
 	println("check")
-	h := t.root.check(1, -1)
+	h := checkPos(t.root, 1)
 	if h != t.hash && (t.root == nil || !t.dirty) {
 		fmt.Printf("have %v want %v\n", t.hash, h)
 		panic("bad hash")
 	}
 }
 
-func (n *memNode) check(depth, pbit int) Hash {
-	nbit := n.bit()
-	if nbit <= pbit {
-		// view as leaf
-		fmt.Printf("%*s%d leaf %v %v %p %p %p %v\n", depth*2, "", n.bit(), n.key, n.val, n, n.left, n.right, hashLeaf(n.key, n.val))
-		return hashLeaf(n.key, n.val)
+func checkPos(pos memAny, depth int) Hash {
+	switch p := pos.(type) {
+	case nil:
+		return emptyTreeHash
+
+	case *memLeaf:
+		fmt.Printf("%*sleaf %v %v %p %v\n", depth*2, "", p.k, p.v, p, hashLeaf(p.k, p.v))
+		return hashLeaf(p.k, p.v)
+
+	case *memNode:
+		fmt.Printf("%*s%d %p %p %p %v\n", depth*2, "", p.bit, p, p.left, p.right, p.ihash)
+		h := hashInner(p.bit, checkPos(p.left, depth+1), checkPos(p.right, depth+1))
+		if h != p.ihash && !p.dirty {
+			fmt.Printf("%*shave %v want %v\n", depth*2, "", p.ihash, h)
+			panic("bad hash")
+		}
+		return h
 	}
-	fmt.Printf("%*s%d %p %p %p %v\n", depth*2, "", n.bit(), n, n.left, n.right, n.ihash)
-	h := hashInner(nbit, n.left.check(depth+1, nbit), n.right.check(depth+1, nbit))
-	if h != n.ihash && !n.dirty {
-		fmt.Printf("%*shave %v want %v\n", depth*2, "", n.ihash, h)
-		panic("bad hash")
-	}
-	return h
+	panic("mpt: invalid tree position")
 }
